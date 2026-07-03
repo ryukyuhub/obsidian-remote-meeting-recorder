@@ -1,0 +1,30 @@
+# Node
+node_modules/
+npm-debug.log*
+yarn-error.log*
+
+# esbuild / TypeScript ビルド成果物
+main.js
+main.js.map
+*.tsbuildinfo
+
+# Swift 録音バイナリ（sysrec）のビルド成果物
+native/sysrec/sysrec
+native/sysrec/*.o
+native/sysrec/build/
+*.dSYM/
+
+# OS / エディタ
+.DS_Store
+Thumbs.db
+*.swp
+
+# 録音データ・作業ディレクトリ（誤コミット防止）
+.meeting-recorder/
+*.m4a
+*.wav
+*.pcm
+
+# 環境変数・シークレット
+.env
+.env.*
