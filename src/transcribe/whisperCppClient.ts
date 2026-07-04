@@ -2,6 +2,7 @@ import { spawn } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
+import { safeUnlink } from "../util/fsx";
 
 export interface TranscribeOptions {
   /** 進捗（0..100）。whisper の -pp 出力を解析して呼ぶ。 */
@@ -51,11 +52,7 @@ export async function transcribeWav(
   try {
     text = fs.readFileSync(txtPath, "utf8");
   } finally {
-    try {
-      fs.unlinkSync(txtPath);
-    } catch {
-      // 無視
-    }
+    safeUnlink(txtPath);
   }
   return text.trim();
 }

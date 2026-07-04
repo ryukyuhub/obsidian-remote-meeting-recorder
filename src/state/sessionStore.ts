@@ -2,7 +2,7 @@ import * as fs from "fs";
 import * as path from "path";
 import type { SessionMeta } from "../types";
 import { sessionPaths, type StatePaths } from "./paths";
-import { atomicWriteFile, ensureDir } from "../util/fsx";
+import { atomicWriteFile, ensureDir, safeUnlink } from "../util/fsx";
 
 /** SID: rec_ + 時刻(36進) + ランダム4文字（設計書 §5.1）。 */
 export function newSessionId(): string {
@@ -47,13 +47,9 @@ export function listSessions(paths: StatePaths): SessionMeta[] {
 /** json/pid/status を削除（log は archiveLog で退避するため残す）。 */
 export function deleteSessionFiles(paths: StatePaths, id: string): void {
   const p = sessionPaths(paths, id);
-  for (const f of [p.json, p.pid, p.status]) {
-    try {
-      fs.unlinkSync(f);
-    } catch {
-      // 無ければ無視
-    }
-  }
+  safeUnlink(p.json);
+  safeUnlink(p.pid);
+  safeUnlink(p.status);
 }
 
 /** sessions/<id>.log → logs/<id>.log へ退避（原因究明用・消さない）。 */

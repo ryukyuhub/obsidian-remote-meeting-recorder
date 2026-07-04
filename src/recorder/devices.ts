@@ -1,7 +1,4 @@
-import { execFile } from "child_process";
-import { promisify } from "util";
-
-const execFileAsync = promisify(execFile);
+import { execFileAsync } from "../util/exec";
 
 /** マイク入力デバイス（uid は sysrec --mic-device にそのまま渡せる）。 */
 export interface MicDevice {

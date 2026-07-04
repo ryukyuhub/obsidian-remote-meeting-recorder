@@ -1,7 +1,18 @@
 // 時刻ユーティリティ（設計書 §9.2・UX 契約）
 
-function pad2(n: number): string {
+/** 2 桁ゼロ埋め。 */
+export function pad2(n: number): string {
   return n.toString().padStart(2, "0");
+}
+
+/** ローカル日付 `YYYY-MM-DD`。 */
+export function formatDate(d: Date): string {
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+}
+
+/** ローカル時刻 `HH:MM`。 */
+export function formatClock(d: Date): string {
+  return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
 }
 
 /**
@@ -9,10 +20,7 @@ function pad2(n: number): string {
  * 呼び出し側で `.m4a` を付与する。
  */
 export function defaultFilename(d: Date = new Date()): string {
-  return (
-    `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}` +
-    `-${pad2(d.getHours())}${pad2(d.getMinutes())}`
-  );
+  return `${formatDate(d)}-${pad2(d.getHours())}${pad2(d.getMinutes())}`;
 }
 
 /** 経過秒を `M:SS` / `H:MM:SS` に整形（status bar 用）。 */

@@ -29,14 +29,3 @@ export function getElectronRemote(): AnyRecord | null {
   }
   return null;
 }
-
-/** レンダラ側 electron（ipcRenderer 等）。 */
-export function getElectron(): AnyRecord | null {
-  const req = nodeRequire();
-  if (!req) return null;
-  try {
-    return req("electron");
-  } catch {
-    return null;
-  }
-}

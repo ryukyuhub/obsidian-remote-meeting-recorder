@@ -1,5 +1,4 @@
-import { execFile, execFileSync } from "child_process";
-import { promisify } from "util";
+import { execFileSync } from "child_process";
 import * as os from "os";
 import * as path from "path";
 import * as fs from "fs";
@@ -7,6 +6,7 @@ import type { RecorderContext } from "../context";
 import { binCandidates } from "../util/resolveBin";
 import { getElectronRemote } from "../platform/electron";
 import { pickAudioFormat } from "../recorder/webCapture";
+import { execFileAsync } from "../util/exec";
 import {
   resolveWhisperBin,
   resolveWhisperModel,
@@ -15,7 +15,15 @@ import {
   modelDownloadTarget,
 } from "../transcribe/resolveWhisper";
 
-const execFileAsync = promisify(execFile);
+// 外部コマンドのタイムアウト（ms）
+const PROBE_TIMEOUT_MS = 5000; // codesign/lipo/xattr/list-devices 等の短命プローブ
+const BUILD_TIMEOUT_MS = 120_000; // sysrec のビルド
+const DOWNLOAD_TIMEOUT_MS = 300_000; // sysrec バイナリのダウンロード
+const MODEL_DOWNLOAD_TIMEOUT_MS = 1_800_000; // Whisper モデル（数百MB〜）
+
+// sysrec check-permission の終了コード
+const TCC_OK = 0; // 許可済み
+const TCC_DENIED = 2; // 明示的に拒否
 
 export type DoctorStatus = "ok" | "ng" | "warn" | "info";
 
@@ -36,7 +44,7 @@ export interface DoctorCheck {
 /** 外部コマンドの終了コードだけ取る（0=成功 / N=失敗 / null=起動不可）。 */
 function execStatus(cmd: string, args: string[]): number | null {
   try {
-    execFileSync(cmd, args, { stdio: "ignore", timeout: 5000 });
+    execFileSync(cmd, args, { stdio: "ignore", timeout: PROBE_TIMEOUT_MS });
     return 0;
   } catch (e) {
     const err = e as { status?: number };
@@ -53,7 +61,7 @@ function tryExecSync(
     const stdout = execFileSync(cmd, args, {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
-      timeout: 5000,
+      timeout: PROBE_TIMEOUT_MS,
     });
     return { ok: true, stdout: stdout.toString(), stderr: "" };
   } catch (e: unknown) {
@@ -134,7 +142,7 @@ export function runDoctor(ctx: RecorderContext): DoctorCheck[] {
     label: "sysrec をビルド",
     run: async () => {
       const { stderr } = await execFileAsync("sh", [buildScript, sysrecTarget], {
-        timeout: 120000,
+        timeout: BUILD_TIMEOUT_MS,
       });
       return stderr?.trim() || "ビルド完了。診断を再実行してください。";
     },
@@ -149,7 +157,7 @@ export function runDoctor(ctx: RecorderContext): DoctorCheck[] {
         "https://github.com/ryukyuhub/obsidian-remote-meeting-recorder/releases/latest/download/sysrec";
       fs.mkdirSync(swiftBuildDir, { recursive: true });
       await execFileAsync("curl", ["-L", "--fail", "-o", sysrecTarget, url], {
-        timeout: 300000,
+        timeout: DOWNLOAD_TIMEOUT_MS,
       });
       fs.chmodSync(sysrecTarget, 0o755);
       try {
@@ -394,7 +402,7 @@ function transcribeChecks(ctx: RecorderContext): DoctorCheck[] {
               "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/" +
               path.basename(target);
             await execFileAsync("curl", ["-L", "--fail", "-o", target, url], {
-              timeout: 1_800_000,
+              timeout: MODEL_DOWNLOAD_TIMEOUT_MS,
             });
             return `ダウンロード完了: ${target}`;
           },
@@ -436,7 +444,7 @@ function tccCheck(binPath: string | null): DoctorCheck {
     };
   }
   const code = execStatus(binPath, ["check-permission"]);
-  if (code === 0) {
+  if (code === TCC_OK) {
     return {
       id: "tcc",
       label: "画面収録権限（TCC）",
@@ -444,7 +452,7 @@ function tccCheck(binPath: string | null): DoctorCheck {
       detail: "許可されています（システム音声を録音できます）。",
     };
   }
-  if (code === 2) {
+  if (code === TCC_DENIED) {
     return {
       id: "tcc",
       label: "画面収録権限（TCC）",

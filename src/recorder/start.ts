@@ -7,7 +7,7 @@ import { newSessionId, writeSessionMeta } from "../state/sessionStore";
 import { sweepOrphans } from "./sweep";
 import { isAlive, pollPidFile, spawnCaffeinate, spawnDetached } from "./spawn";
 import { defaultFilename } from "../util/time";
-import { ensureDir, exists, tailFile } from "../util/fsx";
+import { ensureDir, exists, safeUnlink, tailFile } from "../util/fsx";
 
 export interface StartResult {
   sessionId: string;
@@ -138,11 +138,6 @@ function buildArgv(
 
 /** 起動失敗時: pid/status を rm（JSON は書いていない・log は tail 用に残す）。 */
 function cleanupFailed(sp: SessionFilePaths): void {
-  for (const f of [sp.pid, sp.status]) {
-    try {
-      fs.unlinkSync(f);
-    } catch {
-      // 無視
-    }
-  }
+  safeUnlink(sp.pid);
+  safeUnlink(sp.status);
 }

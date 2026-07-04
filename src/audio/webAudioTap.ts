@@ -49,10 +49,6 @@ export class WebAudioTap {
     return sum / this.data.length / 255;
   }
 
-  get active(): boolean {
-    return this.stream != null;
-  }
-
   stop(): void {
     try {
       this.stream?.getTracks().forEach((t) => t.stop());

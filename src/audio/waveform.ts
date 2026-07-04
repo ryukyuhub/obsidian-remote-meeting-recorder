@@ -29,13 +29,6 @@ export class WaveformRenderer {
     this.raf = 0;
   }
 
-  /** 静止クリア（idle / system ソース時）。 */
-  clear(): void {
-    this.bars.fill(0);
-    const ctx = this.canvas.getContext("2d");
-    if (ctx) ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-  }
-
   private draw(): void {
     const canvas = this.canvas;
     const dpr = window.devicePixelRatio || 1;

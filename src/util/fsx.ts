@@ -1,10 +1,18 @@
-import { promises as fsp } from "fs";
 import * as fs from "fs";
 import * as path from "path";
 
 /** ディレクトリを再帰的に作成（既存でもエラーにしない）。 */
 export function ensureDir(dir: string): void {
   fs.mkdirSync(dir, { recursive: true });
+}
+
+/** ファイル削除（存在しない/失敗は無視）。中間ファイル掃除で共用。 */
+export function safeUnlink(p: string): void {
+  try {
+    fs.unlinkSync(p);
+  } catch {
+    // 無ければ無視
+  }
 }
 
 /** ファイル/ディレクトリの存在確認（例外を投げない）。 */
@@ -61,17 +69,6 @@ export function atomicWriteFile(dest: string, data: string): void {
 export function tailFile(p: string, n: number): string {
   try {
     const text = fs.readFileSync(p, "utf8");
-    const lines = text.split(/\r?\n/);
-    return lines.slice(Math.max(0, lines.length - n)).join("\n").trim();
-  } catch {
-    return "";
-  }
-}
-
-/** 非同期版 tail（大きめログ向け）。 */
-export async function tailFileAsync(p: string, n: number): Promise<string> {
-  try {
-    const text = await fsp.readFile(p, "utf8");
     const lines = text.split(/\r?\n/);
     return lines.slice(Math.max(0, lines.length - n)).join("\n").trim();
   } catch {

@@ -6,7 +6,7 @@ import { readSessionMeta, finalizeCleanup } from "../state/sessionStore";
 import { isAlive } from "./spawn";
 import { runMix, rescueRename } from "./mix";
 import { delay } from "../util/delay";
-import { existsWithSize, intermediatePaths, statBytes } from "../util/fsx";
+import { existsWithSize, intermediatePaths, safeUnlink, statBytes } from "../util/fsx";
 
 /** status ファイルに stopped イベントが現れたか（キーは sortedKeys でこの並び）。 */
 export function statusHasStopped(statusPath: string): boolean {
@@ -142,12 +142,4 @@ function stopped(meta: SessionMeta, out: string, durationSec?: number): Terminal
     bytes: statBytes(out),
     durationSec,
   };
-}
-
-function safeUnlink(p: string): void {
-  try {
-    fs.unlinkSync(p);
-  } catch {
-    // 無視
-  }
 }

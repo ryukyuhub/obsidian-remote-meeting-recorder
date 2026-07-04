@@ -4,7 +4,7 @@ import type { RecorderContext } from "../context";
 import type { RecorderSource, TerminalEvent } from "../types";
 import { sessionPaths } from "../state/paths";
 import { readSessionMeta, finalizeCleanup } from "../state/sessionStore";
-import { existsWithSize, intermediatePaths, statBytes } from "../util/fsx";
+import { existsWithSize, intermediatePaths, safeUnlink, statBytes } from "../util/fsx";
 
 /**
  * オフライン mix。`caffeinate -i` で包んで実行し、終了コード + 出力ファイルで成否判定。
@@ -149,13 +149,3 @@ export async function remix(ctx: RecorderContext, opts: RemixOptions): Promise<T
     message: "中間ファイルがありません（復旧できません）",
   };
 }
-
-function safeUnlink(p: string): void {
-  try {
-    fs.unlinkSync(p);
-  } catch {
-    // 無視
-  }
-}
-
-export { terminalStopped };

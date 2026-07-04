@@ -11,6 +11,11 @@ export function computeVaultRelative(app: App, absPath: string): string | null {
   return normalizePath(rel);
 }
 
+/** Vault 相対パスから埋め込みリンク文字列 `![[rel]]` を作る。 */
+export function wikilinkEmbed(rel: string): string {
+  return `![[${rel}]]`;
+}
+
 /**
  * 停止時に `![[<相対>.m4a]]` を挿入（設計書 §9.4）。
  * 埋め込み先は録音開始時にキャプチャしたノートに固定（長時間録音中の切替に強い）。
@@ -26,7 +31,7 @@ export async function insertEmbed(
     new Notice(`録音を保存しました（Vault 外）:\n${absPath}`);
     return false;
   }
-  const link = `![[${rel}]]`;
+  const link = wikilinkEmbed(rel);
 
   if (startFile) {
     // 開始時のノートがアクティブエディタで開かれていればカーソル位置へ、

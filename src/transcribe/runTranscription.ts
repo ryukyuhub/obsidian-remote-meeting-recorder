@@ -6,8 +6,10 @@ import type RemoteMeetingRecorderPlugin from "../main";
 import { decodeToPcm16k, pcmToWav } from "./pcm";
 import { transcribeWav } from "./whisperCppClient";
 import { resolveWhisperBin, resolveWhisperModel } from "./resolveWhisper";
-import { computeVaultRelative } from "../ui/embed";
+import { computeVaultRelative, wikilinkEmbed } from "../ui/embed";
 import { resolveDailyNote } from "../ui/dailyNote";
+import { formatClock, formatDate } from "../util/time";
+import { safeUnlink } from "../util/fsx";
 
 function readArrayBuffer(p: string): ArrayBuffer {
   const buf = fs.readFileSync(p);
@@ -143,11 +145,7 @@ async function transcribeViaWhisperCpp(
     });
     return { text, durationSec };
   } finally {
-    try {
-      fs.unlinkSync(wavPath);
-    } catch {
-      // 無視
-    }
+    safeUnlink(wavPath);
   }
 }
 
@@ -162,16 +160,12 @@ function buildMarkdown(text: string, dateTime: string, lang?: string): string {
  * 録音長ぶんさかのぼる）。終了は開始＋録音長。日をまたぐ場合は終了側にも日付を付ける。
  */
 function recordingTimeRange(audioPath: string, durationSec: number): string {
-  const p = (n: number): string => String(n).padStart(2, "0");
-  const date = (d: Date): string => `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
-  const hm = (d: Date): string => `${p(d.getHours())}:${p(d.getMinutes())}`;
-
   const start = recordingStart(audioPath, durationSec);
   const end = new Date(start.getTime() + Math.max(0, durationSec) * 1000);
 
-  return date(start) === date(end)
-    ? `${date(start)} ${hm(start)}〜${hm(end)}`
-    : `${date(start)} ${hm(start)}〜${date(end)} ${hm(end)}`;
+  return formatDate(start) === formatDate(end)
+    ? `${formatDate(start)} ${formatClock(start)}〜${formatClock(end)}`
+    : `${formatDate(start)} ${formatClock(start)}〜${formatDate(end)} ${formatClock(end)}`;
 }
 
 /** 録音開始時刻。ファイル名（既定命名）優先、なければ更新時刻−録音長。 */
@@ -202,7 +196,7 @@ async function appendResult(
 
   // 未選択時は音声への埋め込みリンクも併記して録音を辿れるようにする（Vault 内のときだけ）
   const rel = computeVaultRelative(app, audioPath);
-  const block = rel && includeDailyEmbed ? `\n![[${rel}]]\n${md}` : md;
+  const block = rel && includeDailyEmbed ? `\n${wikilinkEmbed(rel)}\n${md}` : md;
 
   // 2) 未選択 → 今日のデイリーノート（コア「デイリーノート」有効時）
   const daily = await resolveDailyNote(app);
@@ -214,7 +208,7 @@ async function appendResult(
   // 3) デイリーノート無効 & Vault 内の録音 → 隣にコンパニオンノート（拡張子は汎用的に .md へ）
   if (rel) {
     const notePath = rel.replace(/\.[^./]+$/, ".md");
-    const file = await ensureNote(app, notePath, `![[${rel}]]\n`);
+    const file = await ensureNote(app, notePath, `${wikilinkEmbed(rel)}\n`);
     if (file) {
       await app.vault.append(file, md);
       return;

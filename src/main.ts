@@ -24,6 +24,10 @@ import { ControlWindowManager } from "./ui/controlWindow";
 import { runTranscription } from "./transcribe/runTranscription";
 import { TranscribePicker } from "./ui/TranscribePicker";
 
+// Notice 表示時間（ms）。長め＝内容を読ませたい警告 / エラー＝失敗通知。
+const NOTICE_LONG_MS = 10000;
+const NOTICE_ERROR_MS = 8000;
+
 /** ビューが操作する前面録音の情報（primary）。 */
 export interface ActiveRecordingInfo {
   sessionId: string;
@@ -236,7 +240,7 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       const tail = e instanceof StartError && e.logTail ? `\n---\n${e.logTail}` : "";
-      new Notice(`録音を開始できませんでした:\n${msg}${tail}`, 10000);
+      new Notice(`録音を開始できませんでした:\n${msg}${tail}`, NOTICE_LONG_MS);
       throw e;
     }
 
@@ -411,18 +415,18 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
         if (wasActive) this.statusBar.setWarning();
         new Notice(
           `⚠ ${ev.message ?? "mix に失敗しました"}\n「失敗した録音を remix 復旧」で復旧できます。`,
-          10000
+          NOTICE_LONG_MS
         );
         break;
       case "remix-error":
         this.lastWarningSessionId = sessionId;
-        new Notice(`⚠ remix に失敗しました: ${ev.message ?? ""}`, 10000);
+        new Notice(`⚠ remix に失敗しました: ${ev.message ?? ""}`, NOTICE_LONG_MS);
         break;
       case "stop-error":
-        new Notice(`停止に失敗しました: ${ev.message ?? ""}`, 8000);
+        new Notice(`停止に失敗しました: ${ev.message ?? ""}`, NOTICE_ERROR_MS);
         break;
       case "start-error":
-        new Notice(`起動に失敗しました: ${ev.message ?? ""}`, 8000);
+        new Notice(`起動に失敗しました: ${ev.message ?? ""}`, NOTICE_ERROR_MS);
         break;
     }
 
@@ -497,9 +501,6 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
     if (!ok) new Notice("ミニ制御ウィンドウを開けませんでした（この環境では未対応）。");
   }
 
-  // ================================================================
-  // グローバルホットキー（§9.4・§14.3）
-  // ================================================================
   // ================================================================
   // remix 復旧
   // ================================================================

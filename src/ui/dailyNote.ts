@@ -1,4 +1,5 @@
 import { App, TFile, normalizePath } from "obsidian";
+import { wikilinkEmbed } from "./embed";
 
 /**
  * デイリーノート連携（設計書 §13・Phase 4）。
@@ -9,7 +10,7 @@ export async function linkToDailyNote(app: App, embedRel: string): Promise<boole
   try {
     const file = await resolveDailyNote(app);
     if (file) {
-      await app.vault.append(file, `\n![[${embedRel}]]\n`);
+      await app.vault.append(file, `\n${wikilinkEmbed(embedRel)}\n`);
       return true;
     }
   } catch {

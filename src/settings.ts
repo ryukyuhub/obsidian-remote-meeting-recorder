@@ -29,7 +29,6 @@ export interface RMRSettings {
   /** whisper.cpp モデル（ggml .bin の絶対パス、または models/ 下の名前） */
   whisperCppModel: string;
   transcribeLanguage: string;
-  translateToEnglish: boolean;
 }
 
 export const DEFAULT_SETTINGS: RMRSettings = {
@@ -50,7 +49,6 @@ export const DEFAULT_SETTINGS: RMRSettings = {
   whisperCppBinPath: "",
   whisperCppModel: "",
   transcribeLanguage: "ja",
-  translateToEnglish: false,
 };
 
 export class RMRSettingTab extends PluginSettingTab {

@@ -1,46 +1,8 @@
 import * as fs from "fs";
 import * as path from "path";
+import { findOnPath, isFile } from "../util/pathProbe";
 
-/* whisper.cpp バイナリ / モデルの解決（sysrec の resolveBin と同じ思想）。 */
-
-function isExec(p: string): boolean {
-  try {
-    fs.accessSync(p, fs.constants.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function isFile(p: string): boolean {
-  try {
-    return fs.statSync(p).isFile();
-  } catch {
-    return false;
-  }
-}
-
-/**
- * PATH 検索ディレクトリ。Obsidian（GUI アプリ）の process.env.PATH には
- * /opt/homebrew/bin 等が含まれないため、Homebrew/MacPorts の標準パスを補う。
- */
-function pathDirs(): string[] {
-  const fromEnv = (process.env.PATH ?? "").split(path.delimiter).filter(Boolean);
-  const common = ["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin"];
-  const seen = new Set(fromEnv);
-  return [...fromEnv, ...common.filter((d) => !seen.has(d))];
-}
-
-function findOnPath(names: string[]): string | null {
-  const dirs = pathDirs();
-  for (const name of names) {
-    for (const dir of dirs) {
-      const c = path.join(dir, name);
-      if (isFile(c) && isExec(c)) return c;
-    }
-  }
-  return null;
-}
+/* whisper.cpp バイナリ / モデルの解決（sysrec の resolveBin と共通の探索処理を使う）。 */
 
 export function whisperDir(pluginDir: string): string {
   return path.join(pluginDir, "native", "whisper");
