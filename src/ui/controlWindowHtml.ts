@@ -1,4 +1,13 @@
-<!doctype html>
+/**
+ * ミニ制御ウィンドウの HTML（設計書 §9.4）。
+ *
+ * 外部ファイル（control-window.html）を同梱して loadFile する方式だと、
+ * BRAT 配布や自己配布は main.js / manifest.json / styles.css の 3 点しか取得しないため
+ * HTML が欠落し、透明フレームレス窓が空ロードで見えなくなる（＝バーが出ない）。
+ * これを避けるため HTML はバンドルに埋め込み、起動時に一時ファイルへ書き出して loadFile する。
+ * data: URL ではなく file: にするのは、ページ内 require("electron") の nodeIntegration を保つため。
+ */
+export const CONTROL_WINDOW_HTML = `<!doctype html>
 <html>
   <head>
     <meta charset="utf-8" />
@@ -123,7 +132,7 @@
           m = ((s % 3600) / 60) | 0,
           x = s % 60;
         const p = (n) => String(n).padStart(2, "0");
-        return h > 0 ? `${h}:${p(m)}:${p(x)}` : `${m}:${p(x)}`;
+        return h > 0 ? \`\${h}:\${p(m)}:\${p(x)}\` : \`\${m}:\${p(x)}\`;
       }
 
       function draw() {
@@ -158,3 +167,4 @@
     </script>
   </body>
 </html>
+`;

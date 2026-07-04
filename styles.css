@@ -4,10 +4,6 @@
 .rmr-statusbar {
   cursor: pointer;
 }
-.rmr-statusbar-active {
-  color: var(--color-red);
-  font-weight: 600;
-}
 .rmr-statusbar-warning {
   color: var(--color-orange);
   font-weight: 600;
@@ -135,12 +131,6 @@
   flex-shrink: 0;
   cursor: pointer;
   padding: 0 8px;
-}
-.rmr-consent {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-top: 4px;
 }
 .rmr-recording-note {
   color: var(--text-muted);

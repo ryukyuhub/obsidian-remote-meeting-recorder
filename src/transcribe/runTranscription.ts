@@ -7,6 +7,7 @@ import { decodeToPcm16k, pcmToWav } from "./pcm";
 import { transcribeWav } from "./whisperCppClient";
 import { resolveWhisperBin, resolveWhisperModel } from "./resolveWhisper";
 import { computeVaultRelative } from "../ui/embed";
+import { resolveDailyNote } from "../ui/dailyNote";
 
 function readArrayBuffer(p: string): ArrayBuffer {
   const buf = fs.readFileSync(p);
@@ -39,7 +40,8 @@ export async function runTranscription(
     }
 
     const md = buildMarkdown(text.trim(), s.transcribeLanguage);
-    await appendResult(plugin.app, target, audioPath, md);
+    // linkToDailyNote オン時はデイリーノートへ埋め込みリンクを別経路で追記済みなので二重埋め込みを避ける
+    await appendResult(plugin.app, target, audioPath, md, !s.linkToDailyNote);
 
     notice.hide();
     new Notice("文字起こしが完了しました。");
@@ -96,15 +98,27 @@ async function appendResult(
   app: App,
   target: TFile | null,
   audioPath: string,
-  md: string
+  md: string,
+  includeDailyEmbed: boolean
 ): Promise<void> {
-  // 1) 指定ノート（開始時ノート or アクティブノート）
+  // 1) 指定ノート（開始時ノート or アクティブノート）→ そのまま追記
   if (target) {
     await app.vault.append(target, md);
     return;
   }
-  // 2) Vault 内の録音 → 隣にコンパニオンノート（拡張子は汎用的に .md へ）
+
+  // 未選択時は音声への埋め込みリンクも併記して録音を辿れるようにする（Vault 内のときだけ）
   const rel = computeVaultRelative(app, audioPath);
+  const block = rel && includeDailyEmbed ? `\n![[${rel}]]\n${md}` : md;
+
+  // 2) 未選択 → 今日のデイリーノート（コア「デイリーノート」有効時）
+  const daily = await resolveDailyNote(app);
+  if (daily) {
+    await app.vault.append(daily, block);
+    return;
+  }
+
+  // 3) デイリーノート無効 & Vault 内の録音 → 隣にコンパニオンノート（拡張子は汎用的に .md へ）
   if (rel) {
     const notePath = rel.replace(/\.[^./]+$/, ".md");
     const file = await ensureNote(app, notePath, `![[${rel}]]\n`);
@@ -113,7 +127,8 @@ async function appendResult(
       return;
     }
   }
-  // 3) Vault 外 → Vault ルートに新規ノート
+
+  // 4) Vault 外 → Vault ルートに新規ノート
   const stem = path.basename(audioPath).replace(/\.[^./]+$/, "");
   const file = await ensureNote(app, `文字起こし-${stem}.md`, `# ${stem}\n`);
   if (file) {

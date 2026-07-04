@@ -10,7 +10,7 @@ export const RECORDING_VIEW_TYPE = "rmr-recording-view";
 
 /**
  * 主要 UI（設計書 §9.1）。タイトル → ライブ波形 → トランスポート → 設定パネル。
- * 録音の都度 Source / Save to を確認し、同意チェックで録音ボタンを gate。
+ * 録音の都度 Source / Save to を確認する。
  */
 export class RecordingView extends ItemView {
   plugin: RemoteMeetingRecorderPlugin;
@@ -22,7 +22,6 @@ export class RecordingView extends ItemView {
   private vAgc: boolean;
   private vMicDevice: string;
   private vMonitor: boolean;
-  private consent = false;
 
   // 埋め込み先ノート（未選択なら停止時に埋め込みしない）
   private vEmbedFile: TFile | null = null;
@@ -144,7 +143,7 @@ export class RecordingView extends ItemView {
     const recBtn = transport.createEl("button", { cls: "rmr-btn rmr-btn-rec" });
     setIcon(recBtn.createSpan(), "circle");
     recBtn.createSpan({ text: " 録音" });
-    recBtn.disabled = this.recording || !this.consent;
+    recBtn.disabled = this.recording;
     recBtn.addEventListener("click", () => void this.onRecord());
 
     const pauseBtn = transport.createEl("button", { cls: "rmr-btn rmr-btn-pause" });
@@ -168,20 +167,7 @@ export class RecordingView extends ItemView {
     this.buildStaticRow(panel, "Format", "M4A（固定）");
     this.buildAgcRow(panel, active != null);
 
-    if (!active) {
-      // 同意チェック（録音ボタンを gate）
-      const consentRow = panel.createDiv({ cls: "rmr-consent" });
-      const cb = consentRow.createEl("input", { attr: { type: "checkbox", id: "rmr-consent" } });
-      cb.checked = this.consent;
-      cb.addEventListener("change", () => {
-        this.consent = cb.checked;
-        recBtn.disabled = this.recording || !this.consent;
-      });
-      consentRow.createEl("label", {
-        text: " 参加者に録音の告知・同意を得た",
-        attr: { for: "rmr-consent" },
-      });
-    } else {
+    if (active) {
       panel.createDiv({
         cls: "rmr-recording-note",
         text: `録音中（${sourceLabel(active.source)}）— 設定は停止までロックされます`,
@@ -331,10 +317,6 @@ export class RecordingView extends ItemView {
   // ================================================================
   private async onRecord(): Promise<void> {
     if (this.recording) return;
-    if (!this.consent) {
-      new Notice("参加者の同意チェックを入れてください。");
-      return;
-    }
     try {
       await this.plugin.startRecordingFromView({
         source: this.vSource,

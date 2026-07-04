@@ -7,6 +7,24 @@ import { App, TFile, normalizePath } from "obsidian";
  */
 export async function linkToDailyNote(app: App, embedRel: string): Promise<boolean> {
   try {
+    const file = await resolveDailyNote(app);
+    if (file) {
+      await app.vault.append(file, `\n![[${embedRel}]]\n`);
+      return true;
+    }
+  } catch {
+    // 連携失敗は致命でない（埋め込み本体は別途挿入済み）
+  }
+  return false;
+}
+
+/**
+ * 今日のデイリーノートを解決（無ければ作成）して返す。
+ * コア「デイリーノート」プラグインが無効・未設定なら null（best-effort）。
+ * 文字起こしの未選択時フォールバック先としても使う。
+ */
+export async function resolveDailyNote(app: App): Promise<TFile | null> {
+  try {
     // 内部 API（型は非公開）。デイリーノートが有効なときだけ動く。
     const internal = (app as unknown as {
       internalPlugins?: {
@@ -14,7 +32,7 @@ export async function linkToDailyNote(app: App, embedRel: string): Promise<boole
       };
     }).internalPlugins;
     const dn = internal?.getPluginById?.("daily-notes");
-    if (!dn?.enabled || !dn.instance) return false;
+    if (!dn?.enabled || !dn.instance) return null;
 
     const opts = (dn.instance as { options?: { format?: string; folder?: string } }).options ?? {};
     const format = opts.format || "YYYY-MM-DD";
@@ -29,14 +47,10 @@ export async function linkToDailyNote(app: App, embedRel: string): Promise<boole
       if (folder) await ensureFolder(app, folder);
       file = await app.vault.create(notePath, "");
     }
-    if (file instanceof TFile) {
-      await app.vault.append(file, `\n![[${embedRel}]]\n`);
-      return true;
-    }
+    return file instanceof TFile ? file : null;
   } catch {
-    // 連携失敗は致命でない（埋め込み本体は別途挿入済み）
+    return null;
   }
-  return false;
 }
 
 async function ensureFolder(app: App, folder: string): Promise<void> {

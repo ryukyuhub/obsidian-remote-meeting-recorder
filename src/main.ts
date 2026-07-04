@@ -276,7 +276,6 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
 
   private onTick(sessionId: string, elapsedSec: number): void {
     if (this.activeRecording?.sessionId !== sessionId) return;
-    this.statusBar.setRecording(elapsedSec);
     this.recordingView?.setElapsed(elapsedSec);
     this.controlWindow?.tick(elapsedSec);
   }
@@ -413,7 +412,7 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
   // ================================================================
   private maybeOpenControlWindow(): void {
     if (!this.settings.enableControlWindow || !this.activeRecording) return;
-    if (!this.controlWindow) this.controlWindow = new ControlWindowManager(this.getPluginDir());
+    if (!this.controlWindow) this.controlWindow = new ControlWindowManager();
     const accent =
       getComputedStyle(document.body).getPropertyValue("--interactive-accent").trim() || "#7c6cf0";
     const ok = this.controlWindow.open(

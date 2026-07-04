@@ -1,9 +1,7 @@
-import { formatElapsed } from "../util/time";
-
 /**
  * ステータスバー制御（設計書 §9.4）。
- * `● REC 12:34` を各 SessionWatcher.onTick で更新。クリックで停止/ビューへ。
- * Phase 0 では土台のみ（録音が入る Phase 1 以降で active 表示を使う）。
+ * 録音中の常時表示は行わず、mix 失敗（remix 待ち）の警告表示のみに使う。
+ * クリックで録音ビューを開く。
  */
 export class StatusBarController {
   private el: HTMLElement;
@@ -20,18 +18,9 @@ export class StatusBarController {
     this.onClick = handler;
   }
 
-  /** 録音中表示（経過秒）。 */
-  setRecording(elapsedSec: number): void {
-    this.el.setText(`● REC ${formatElapsed(elapsedSec)}`);
-    this.el.removeClass("rmr-statusbar-warning");
-    this.el.addClass("rmr-statusbar-active");
-    this.el.removeClass("rmr-hidden");
-  }
-
   /** mix 失敗（remix 待ち）表示。 */
   setWarning(): void {
     this.el.setText("⚠ remix needed");
-    this.el.removeClass("rmr-statusbar-active");
     this.el.addClass("rmr-statusbar-warning");
     this.el.removeClass("rmr-hidden");
   }
@@ -39,7 +28,6 @@ export class StatusBarController {
   /** 非表示（録音していない）。 */
   clear(): void {
     this.el.setText("");
-    this.el.removeClass("rmr-statusbar-active");
     this.el.removeClass("rmr-statusbar-warning");
     this.el.addClass("rmr-hidden");
   }

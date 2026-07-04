@@ -1,5 +1,8 @@
+import * as fs from "fs";
+import * as os from "os";
 import * as path from "path";
 import { getElectronRemote } from "../platform/electron";
+import { CONTROL_WINDOW_HTML } from "./controlWindowHtml";
 
 /* eslint-disable @typescript-eslint/no-explicit-any -- Electron の remote API（BrowserWindow/ipcMain 等）は型情報が乏しく any 経由で扱う */
 
@@ -26,8 +29,6 @@ export class ControlWindowManager {
   private stopHandler: ((...args: any[]) => void) | null = null;
   private levelTimer: number | null = null;
 
-  constructor(private pluginDir: string) {}
-
   open(
     config: ControlWindowConfig,
     onStop: () => void,
@@ -36,6 +37,10 @@ export class ControlWindowManager {
     const remote = getElectronRemote() as any;
     if (!remote?.BrowserWindow) return false;
     this.close(); // 既存があれば閉じる
+
+    // HTML はバンドル埋め込み → 一時ファイルへ書き出して file: で読む（同梱漏れに強い）
+    const htmlPath = writeControlWindowHtml();
+    if (!htmlPath) return false;
 
     const W = 340;
     const H = 96;
@@ -85,7 +90,7 @@ export class ControlWindowManager {
       /* 非対応なら無視 */
     }
 
-    this.win.loadFile(path.join(this.pluginDir, "control-window.html"));
+    this.win.loadFile(htmlPath);
     this.win.webContents.on("did-finish-load", () => this.safeSend(CH_CONFIG, config));
 
     // 停止（子 → 親）: ipcMain 経由で親レンダラのハンドラを呼ぶ
@@ -151,5 +156,16 @@ export class ControlWindowManager {
     }
     this.stopHandler = null;
     this.win = null;
+  }
+}
+
+/** 埋め込み HTML を一時ファイルへ書き出してパスを返す。失敗時は null。 */
+function writeControlWindowHtml(): string | null {
+  try {
+    const p = path.join(os.tmpdir(), "rmr-control-window.html");
+    fs.writeFileSync(p, CONTROL_WINDOW_HTML);
+    return p;
+  } catch {
+    return null;
   }
 }
