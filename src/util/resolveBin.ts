@@ -35,9 +35,14 @@ function fileExists(p: string): boolean {
   }
 }
 
-/** PATH から `sysrec` を探す（最初に見つかった実行可能なもの）。 */
+/** PATH から `sysrec` を探す（GUI アプリの PATH に無い Homebrew 等も補う）。 */
 function findOnPath(): string | null {
-  const dirs = (process.env.PATH ?? "").split(path.delimiter).filter(Boolean);
+  const fromEnv = (process.env.PATH ?? "").split(path.delimiter).filter(Boolean);
+  const seen = new Set(fromEnv);
+  const dirs = [
+    ...fromEnv,
+    ...["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin"].filter((d) => !seen.has(d)),
+  ];
   for (const dir of dirs) {
     const candidate = path.join(dir, "sysrec");
     if (fileExists(candidate) && isExecutable(candidate)) return candidate;

@@ -13,5 +13,18 @@
   "linkToDailyNote": true,
   "enableGlobalHotkey": false,
   "globalHotkeyAccelerator": "CommandOrControl+Shift+R",
-  "enableControlWindow": true
+  "enableControlWindow": true,
+  "transcribeOnStop": true,
+  "transcribeBackend": "whispercpp",
+  "whisperServerUrl": "http://127.0.0.1:5678",
+  "whisperModel": "",
+  "whisperCppBinPath": "",
+  "whisperCppModel": "",
+  "transcribeLanguage": "ja",
+  "translateToEnglish": false,
+  "summarizeOnTranscribe": false,
+  "aiProvider": "anthropic",
+  "aiModel": "",
+  "aiApiKey": "",
+  "transcriptPostAction": "full"
 }

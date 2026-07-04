@@ -20,8 +20,19 @@ function isFile(p: string): boolean {
   }
 }
 
+/**
+ * PATH 検索ディレクトリ。Obsidian（GUI アプリ）の process.env.PATH には
+ * /opt/homebrew/bin 等が含まれないため、Homebrew/MacPorts の標準パスを補う。
+ */
+function pathDirs(): string[] {
+  const fromEnv = (process.env.PATH ?? "").split(path.delimiter).filter(Boolean);
+  const common = ["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin"];
+  const seen = new Set(fromEnv);
+  return [...fromEnv, ...common.filter((d) => !seen.has(d))];
+}
+
 function findOnPath(names: string[]): string | null {
-  const dirs = (process.env.PATH ?? "").split(path.delimiter).filter(Boolean);
+  const dirs = pathDirs();
   for (const name of names) {
     for (const dir of dirs) {
       const c = path.join(dir, name);
