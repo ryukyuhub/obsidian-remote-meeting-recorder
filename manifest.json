@@ -1,7 +1,7 @@
 {
   "id": "remote-meeting-recorder",
   "name": "Remote Meeting Recorder",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "minAppVersion": "1.7.2",
   "description": "Record macOS system audio and your microphone together for meetings with crash-safe sessions, then embed the audio and a local transcript into your notes. Recording uses an external helper binary based on ScreenCaptureKit.",
   "author": "Ryukyu HUB Inc.",
