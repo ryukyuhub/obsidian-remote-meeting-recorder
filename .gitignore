@@ -14,6 +14,13 @@ native/sysrec/*.o
 native/sysrec/build/
 *.dSYM/
 
+# whisper.cpp のビルド成果物・クローン・モデル（大容量）
+native/whisper/whisper-cli
+native/whisper/whisper.cpp/
+native/whisper/build/
+native/whisper/models/
+*.bin
+
 # OS / エディタ
 .DS_Store
 Thumbs.db

@@ -26,8 +26,14 @@ export interface RMRSettings {
   enableControlWindow: boolean;
   // 文字起こし（Phase 6・設計書 §15）
   transcribeOnStop: boolean;
+  /** whispercpp = 同梱バイナリ（サーバ不要・既定） / server = ローカル Whisper サーバ */
+  transcribeBackend: TranscribeBackend;
   whisperServerUrl: string;
   whisperModel: string;
+  /** whisper.cpp バイナリの絶対パス（空なら自動検出） */
+  whisperCppBinPath: string;
+  /** whisper.cpp モデル（ggml .bin の絶対パス、または models/ 下の名前） */
+  whisperCppModel: string;
   transcribeLanguage: string;
   translateToEnglish: boolean;
   summarizeOnTranscribe: boolean;
@@ -38,6 +44,7 @@ export interface RMRSettings {
 }
 
 export type TranscriptPostAction = "transcript" | "summary" | "full";
+export type TranscribeBackend = "whispercpp" | "server";
 
 export const DEFAULT_SETTINGS: RMRSettings = {
   binPath: "",
@@ -56,8 +63,11 @@ export const DEFAULT_SETTINGS: RMRSettings = {
   globalHotkeyAccelerator: "CommandOrControl+Shift+R",
   enableControlWindow: false,
   transcribeOnStop: false,
+  transcribeBackend: "whispercpp",
   whisperServerUrl: "http://127.0.0.1:5678",
   whisperModel: "",
+  whisperCppBinPath: "",
+  whisperCppModel: "",
   transcribeLanguage: "ja",
   translateToEnglish: false,
   summarizeOnTranscribe: false,
@@ -308,7 +318,7 @@ export class RMRSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("停止時に自動で文字起こし")
-      .setDesc("録音停止後、m4a をローカル Whisper サーバへ送り、結果をノートに追記します。")
+      .setDesc("録音停止後、m4a を文字起こしして結果をノートに追記します。")
       .addToggle((t) =>
         t.setValue(this.plugin.settings.transcribeOnStop).onChange(async (v) => {
           this.plugin.settings.transcribeOnStop = v;
@@ -317,8 +327,51 @@ export class RMRSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
+      .setName("エンジン")
+      .setDesc("whisper.cpp（同梱・サーバ不要・推奨）/ ローカル Whisper サーバ。")
+      .addDropdown((d) =>
+        d
+          .addOption("whispercpp", "whisper.cpp（同梱）")
+          .addOption("server", "Whisper サーバ")
+          .setValue(this.plugin.settings.transcribeBackend)
+          .onChange(async (v) => {
+            this.plugin.settings.transcribeBackend = v as TranscribeBackend;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("whisper.cpp モデル")
+      .setDesc(
+        "ggml モデルの絶対パス、または models/ 下の名前（例: ggml-large-v3-turbo）。" +
+          "診断（doctor）からダウンロードできます。"
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder("ggml-large-v3-turbo")
+          .setValue(this.plugin.settings.whisperCppModel)
+          .onChange(async (v) => {
+            this.plugin.settings.whisperCppModel = v.trim();
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("whisper.cpp バイナリパス")
+      .setDesc("空欄なら native/whisper/ → PATH の whisper-cli を自動検出。")
+      .addText((text) =>
+        text
+          .setPlaceholder("（自動検出）")
+          .setValue(this.plugin.settings.whisperCppBinPath)
+          .onChange(async (v) => {
+            this.plugin.settings.whisperCppBinPath = v.trim();
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
       .setName("Whisper サーバ URL")
-      .setDesc("既定 http://127.0.0.1:5678（ローカル MLX サーバ）。")
+      .setDesc("エンジン=サーバ のとき使用。既定 http://127.0.0.1:5678（ローカル MLX）。")
       .addText((text) =>
         text
           .setPlaceholder("http://127.0.0.1:5678")
@@ -396,7 +449,7 @@ export class RMRSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("AI モデル")
-      .setDesc("空欄はプロバイダ既定（Anthropic は claude-sonnet-4）。")
+      .setDesc("空欄はプロバイダ既定（Anthropic は claude-opus-4-8）。")
       .addText((text) =>
         text
           .setPlaceholder("(既定)")

@@ -5,6 +5,12 @@ import * as path from "path";
 import * as fs from "fs";
 import type { RecorderContext } from "../context";
 import { binCandidates } from "../util/resolveBin";
+import {
+  resolveWhisperBin,
+  resolveWhisperModel,
+  whisperModelsDir,
+  modelDownloadTarget,
+} from "../transcribe/resolveWhisper";
 
 const execFileAsync = promisify(execFile);
 
@@ -226,14 +232,59 @@ export function runDoctor(ctx: RecorderContext): DoctorCheck[] {
   // 7. 状態ディレクトリ / 8. TCC（実バイナリで権限プリフライト）
   checks.push(...stateAndTccChecks(ctx, binPath));
 
-  // 9. Whisper サーバ（文字起こし・Phase 6）
-  checks.push(whisperCheck(ctx.settings.whisperServerUrl || "http://127.0.0.1:5678"));
+  // 9. 文字起こし（backend 別・Phase 6）
+  checks.push(...transcribeChecks(ctx));
 
   return checks;
 }
 
+/** 文字起こしバックエンドに応じたチェック（whisper.cpp バイナリ/モデル or サーバ疎通）。 */
+function transcribeChecks(ctx: RecorderContext): DoctorCheck[] {
+  const s = ctx.settings;
+  if (s.transcribeBackend === "server") {
+    return [whisperServerCheck(s.whisperServerUrl || "http://127.0.0.1:5678")];
+  }
+
+  const out: DoctorCheck[] = [];
+  const bin = resolveWhisperBin(ctx.pluginDir, s.whisperCppBinPath);
+  out.push({
+    id: "whispercpp-bin",
+    label: "whisper.cpp バイナリ",
+    status: bin ? "ok" : "warn",
+    detail: bin
+      ? bin
+      : "見つかりません。`npm run build-whisper` でビルドするか `brew install whisper-cpp` してください。",
+  });
+
+  const model = resolveWhisperModel(ctx.pluginDir, s.whisperCppModel);
+  const dlName = (s.whisperCppModel || "large-v3-turbo-q5_0").trim();
+  out.push({
+    id: "whispercpp-model",
+    label: "Whisper モデル",
+    status: model ? "ok" : "warn",
+    detail: model ? model : `見つかりません（${dlName} をダウンロードできます・数百MB〜）。`,
+    fix: model
+      ? undefined
+      : {
+          label: `${dlName} を取得`,
+          run: async () => {
+            const target = modelDownloadTarget(ctx.pluginDir, dlName);
+            fs.mkdirSync(whisperModelsDir(ctx.pluginDir), { recursive: true });
+            const url =
+              "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/" +
+              path.basename(target);
+            await execFileAsync("curl", ["-L", "--fail", "-o", target, url], {
+              timeout: 1_800_000,
+            });
+            return `ダウンロード完了: ${target}`;
+          },
+        },
+  });
+  return out;
+}
+
 /** Whisper サーバの /health を curl で叩いて疎通確認（文字起こしは任意なので未接続は warn）。 */
-function whisperCheck(baseUrl: string): DoctorCheck {
+function whisperServerCheck(baseUrl: string): DoctorCheck {
   const healthUrl = baseUrl.replace(/\/+$/, "") + "/health";
   const r = tryExecSync("curl", ["-s", "-m", "3", healthUrl]);
   if (r.ok && r.stdout.trim()) {

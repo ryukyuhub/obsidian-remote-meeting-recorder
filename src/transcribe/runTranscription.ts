@@ -1,10 +1,14 @@
 import { App, Notice, TFile } from "obsidian";
 import * as fs from "fs";
+import * as os from "os";
 import * as path from "path";
 import type RemoteMeetingRecorderPlugin from "../main";
 import type { TranscriptPostAction } from "../settings";
-import { decodeToPcm16k, f32ToB64 } from "./pcm";
-import { WhisperClient, type ActionsResult } from "./whisperClient";
+import { decodeToPcm16k, f32ToB64, pcmToWav } from "./pcm";
+import { WhisperClient } from "./whisperClient";
+import { transcribeWav } from "./whisperCppClient";
+import { resolveWhisperBin, resolveWhisperModel } from "./resolveWhisper";
+import { summarizeWithAnthropic } from "../ai/summarize";
 import { computeVaultRelative } from "../ui/embed";
 
 function readArrayBuffer(p: string): ArrayBuffer {
@@ -14,8 +18,8 @@ function readArrayBuffer(p: string): ArrayBuffer {
 
 /**
  * 録音後 一括文字起こし（設計書 §15.2 ①・sysrec 無改修）。
- * m4a → 16kHz mono PCM → Whisper サーバ → 全文（＋任意で AI 要約）→ ノート追記。
- * 埋め込み先ノート（開始時にキャプチャ）があればそこへ、無ければ録音の隣にコンパニオンノート。
+ * バックエンド: whisper.cpp 同梱バイナリ（既定・サーバ不要）or ローカル Whisper サーバ。
+ * m4a → 16kHz mono PCM → 文字起こし →（任意で AI 要約）→ ノート追記。
  */
 export async function runTranscription(
   plugin: RemoteMeetingRecorderPlugin,
@@ -23,52 +27,30 @@ export async function runTranscription(
   target: TFile | null
 ): Promise<void> {
   const s = plugin.settings;
-  const client = new WhisperClient(s.whisperServerUrl);
-  const notice = new Notice("文字起こし中…（Whisper）", 0);
+  const notice = new Notice("文字起こし中…", 0);
   try {
-    const health = await client.health();
-    if (!health) {
+    const text =
+      s.transcribeBackend === "server"
+        ? await transcribeViaServer(plugin, audioPath)
+        : await transcribeViaWhisperCpp(plugin, audioPath);
+
+    if (text == null) {
       notice.hide();
-      new Notice(
-        `Whisper サーバに接続できません（${s.whisperServerUrl}）。起動と設定を確認してください。`,
-        10000
-      );
-      return;
+      return; // エラーは各 backend 内で Notice 済み
     }
-
-    const bytes = readArrayBuffer(audioPath);
-    const pcm = await decodeToPcm16k(bytes);
-    const b64 = f32ToB64(pcm);
-
-    const tr = await client.transcribe(b64, {
-      language: s.transcribeLanguage || "auto",
-      model: s.whisperModel || undefined,
-    });
-    const text = (tr.text || "").trim();
-    if (!text) {
+    if (!text.trim()) {
       notice.hide();
       new Notice("文字起こし結果が空でした（無音の可能性）。");
       return;
     }
 
-    let summary = "";
-    let actions: ActionsResult | null = null;
+    let summaryMd = "";
     const wantSummary = s.summarizeOnTranscribe && s.transcriptPostAction !== "transcript";
     if (wantSummary) {
-      if (!s.aiApiKey) {
-        new Notice("AI キーが未設定のため要約をスキップしました。");
-      } else {
-        const ai = { provider: s.aiProvider, apiKey: s.aiApiKey, model: s.aiModel || undefined };
-        try {
-          summary = (await client.summarize(text, ai)).summary?.trim() ?? "";
-          actions = await client.extractActions(text, ai);
-        } catch (e) {
-          new Notice(`要約に失敗（文字起こしは保存します）: ${(e as Error).message}`);
-        }
-      }
+      summaryMd = await summarize(plugin, text);
     }
 
-    const md = buildMarkdown(s.transcriptPostAction, text, summary, actions, tr.detected_language);
+    const md = buildMarkdown(s.transcriptPostAction, text.trim(), summaryMd, s.transcribeLanguage);
     await appendResult(plugin.app, target, audioPath, md, s.saveInVault);
 
     notice.hide();
@@ -79,40 +61,108 @@ export async function runTranscription(
   }
 }
 
+/** whisper.cpp（同梱バイナリ）で文字起こし。失敗時は Notice して null。 */
+async function transcribeViaWhisperCpp(
+  plugin: RemoteMeetingRecorderPlugin,
+  audioPath: string
+): Promise<string | null> {
+  const s = plugin.settings;
+  const pluginDir = plugin.getPluginDir();
+  const bin = resolveWhisperBin(pluginDir, s.whisperCppBinPath);
+  if (!bin) {
+    new Notice(
+      "whisper.cpp が見つかりません。診断（doctor）でビルド/取得するか、brew install whisper-cpp してください。",
+      10000
+    );
+    return null;
+  }
+  const model = resolveWhisperModel(pluginDir, s.whisperCppModel);
+  if (!model) {
+    new Notice("Whisper モデルが見つかりません。診断（doctor）からダウンロードしてください。", 10000);
+    return null;
+  }
+
+  // m4a → 16kHz mono PCM → WAV（whisper.cpp は m4a 非対応・wav/flac/mp3/ogg のみ）
+  const pcm = await decodeToPcm16k(readArrayBuffer(audioPath));
+  const wavBuf = pcmToWav(pcm, 16000);
+  const base = path.join(os.tmpdir(), `rmr-tx-${process.pid}-${pcm.length}`);
+  const wavPath = `${base}.wav`;
+  fs.writeFileSync(wavPath, Buffer.from(wavBuf));
+  try {
+    return await transcribeWav(bin, model, wavPath, s.transcribeLanguage || "auto", base);
+  } finally {
+    try {
+      fs.unlinkSync(wavPath);
+    } catch {
+      // 無視
+    }
+  }
+}
+
+/** ローカル Whisper サーバで文字起こし。失敗時は Notice して null。 */
+async function transcribeViaServer(
+  plugin: RemoteMeetingRecorderPlugin,
+  audioPath: string
+): Promise<string | null> {
+  const s = plugin.settings;
+  const client = new WhisperClient(s.whisperServerUrl);
+  const health = await client.health();
+  if (!health) {
+    new Notice(
+      `Whisper サーバに接続できません（${s.whisperServerUrl}）。起動と設定を確認してください。`,
+      10000
+    );
+    return null;
+  }
+  const pcm = await decodeToPcm16k(readArrayBuffer(audioPath));
+  const b64 = f32ToB64(pcm);
+  const tr = await client.transcribe(b64, {
+    language: s.transcribeLanguage || "auto",
+    model: s.whisperModel || undefined,
+  });
+  return tr.text || "";
+}
+
+/** AI 要約（既定 Anthropic 直接 / openai・ollama はサーバ経由）。失敗は空文字。 */
+async function summarize(plugin: RemoteMeetingRecorderPlugin, text: string): Promise<string> {
+  const s = plugin.settings;
+  try {
+    if (s.aiProvider === "anthropic") {
+      if (!s.aiApiKey) {
+        new Notice("AI キーが未設定のため要約をスキップしました。");
+        return "";
+      }
+      return await summarizeWithAnthropic(text, {
+        provider: s.aiProvider,
+        apiKey: s.aiApiKey,
+        model: s.aiModel,
+        language: s.transcribeLanguage,
+      });
+    }
+    // openai / ollama はサーバ /summarize に委譲
+    const client = new WhisperClient(s.whisperServerUrl);
+    const sm = await client.summarize(text, {
+      provider: s.aiProvider,
+      apiKey: s.aiApiKey,
+      model: s.aiModel || undefined,
+    });
+    return sm.summary?.trim() ?? "";
+  } catch (e) {
+    new Notice(`要約に失敗（文字起こしは保存します）: ${(e as Error).message}`);
+    return "";
+  }
+}
+
 function buildMarkdown(
   action: TranscriptPostAction,
   text: string,
-  summary: string,
-  actions: ActionsResult | null,
+  summaryMd: string,
   lang?: string
 ): string {
   const out: string[] = [];
-  out.push(`\n> [!note] 文字起こし${lang ? `（${lang}）` : ""}`);
-
-  const wantSummary = action === "summary" || action === "full";
-  if (wantSummary && summary) {
-    out.push(`\n### 要約\n${summary}`);
-  }
-  if (wantSummary && actions) {
-    const items = actions.action_items ?? [];
-    if (items.length) {
-      out.push(`\n### アクションアイテム`);
-      for (const a of items) {
-        const who = a.owner ? ` @${a.owner}` : "";
-        const due = a.due ? `（${a.due}）` : "";
-        out.push(`- [ ] ${a.task ?? ""}${who}${due}`);
-      }
-    }
-    const decisions = actions.decisions ?? [];
-    if (decisions.length) {
-      out.push(`\n### 決定事項`);
-      for (const d of decisions) out.push(`- ${d}`);
-    }
-    const followUps = actions.follow_ups ?? [];
-    if (followUps.length) {
-      out.push(`\n### フォローアップ`);
-      for (const f of followUps) out.push(`- ${f}`);
-    }
+  out.push(`\n> [!note] 文字起こし${lang && lang !== "auto" ? `（${lang}）` : ""}`);
+  if ((action === "summary" || action === "full") && summaryMd) {
+    out.push(`\n${summaryMd}`);
   }
   if (action === "transcript" || action === "full") {
     out.push(`\n### 全文\n${text}`);
@@ -127,12 +177,10 @@ async function appendResult(
   md: string,
   saveInVault: boolean
 ): Promise<void> {
-  // 1) 開始時ノート（埋め込み先）に追記
   if (target) {
     await app.vault.append(target, md);
     return;
   }
-  // 2) 録音の隣にコンパニオンノート
   if (saveInVault) {
     const rel = computeVaultRelative(app, audioPath);
     if (rel) {
