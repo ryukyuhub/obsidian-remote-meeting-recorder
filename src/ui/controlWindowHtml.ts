@@ -12,6 +12,9 @@ export const CONTROL_WINDOW_HTML = `<!doctype html>
   <head>
     <meta charset="utf-8" />
     <style>
+      * {
+        box-sizing: border-box;
+      }
       html,
       body {
         margin: 0;
@@ -38,6 +41,7 @@ export const CONTROL_WINDOW_HTML = `<!doctype html>
         display: flex;
         align-items: center;
         gap: 8px;
+        flex-shrink: 0;
       }
       #dot {
         width: 10px;
@@ -64,28 +68,36 @@ export const CONTROL_WINDOW_HTML = `<!doctype html>
       }
       #wave {
         flex: 1;
+        min-width: 0;
         height: 40px;
       }
       #msg {
         flex: 1;
+        min-width: 0;
         color: #bbb;
         font-size: 12px;
         text-align: center;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
         display: none;
       }
       #stop {
         -webkit-app-region: no-drag;
+        flex-shrink: 0;
         cursor: pointer;
-        width: 30px;
-        height: 30px;
+        width: 26px;
+        height: 26px;
+        padding: 0;
+        line-height: 1;
         border: none;
-        border-radius: 8px;
+        border-radius: 7px;
         background: #e5484d;
         color: #fff;
         display: flex;
         align-items: center;
         justify-content: center;
-        font-size: 11px;
+        font-size: 10px;
       }
       #stop:hover {
         background: #f2555a;
