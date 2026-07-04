@@ -66,7 +66,7 @@ export class RMRSettingTab extends PluginSettingTab {
     containerEl.empty();
 
     // --- バイナリ ---
-    containerEl.createEl("h3", { text: "録音エンジン（sysrec）" });
+    new Setting(containerEl).setName("録音エンジン（sysrec）").setHeading();
 
     const binSetting = new Setting(containerEl)
       .setName("バイナリパス")
@@ -111,7 +111,7 @@ export class RMRSettingTab extends PluginSettingTab {
       );
 
     // --- 保存先 ---
-    containerEl.createEl("h3", { text: "保存先" });
+    new Setting(containerEl).setName("保存先").setHeading();
 
     new Setting(containerEl)
       .setName("Vault 内に保存")
@@ -154,7 +154,7 @@ export class RMRSettingTab extends PluginSettingTab {
       );
 
     // --- 録音既定 ---
-    containerEl.createEl("h3", { text: "録音の既定値" });
+    new Setting(containerEl).setName("録音の既定値").setHeading();
 
     new Setting(containerEl)
       .setName("既定のソース")
@@ -252,7 +252,7 @@ export class RMRSettingTab extends PluginSettingTab {
       );
 
     // --- 停止時の動作 ---
-    containerEl.createEl("h3", { text: "停止時" });
+    new Setting(containerEl).setName("停止時").setHeading();
 
     new Setting(containerEl)
       .setName("停止時にノートに埋め込み")
@@ -278,7 +278,7 @@ export class RMRSettingTab extends PluginSettingTab {
       );
 
     // --- 会議アプリ前面での操作（Phase 4） ---
-    containerEl.createEl("h3", { text: "会議アプリ前面での操作" });
+    new Setting(containerEl).setName("会議アプリ前面での操作").setHeading();
 
     new Setting(containerEl)
       .setName("常時前面ミニ制御ウィンドウ")
@@ -291,7 +291,7 @@ export class RMRSettingTab extends PluginSettingTab {
       );
 
     // --- 文字起こし（Phase 6・whisper.cpp 同梱） ---
-    containerEl.createEl("h3", { text: "文字起こし（whisper.cpp・同梱）" });
+    new Setting(containerEl).setName("文字起こし（whisper.cpp・同梱）").setHeading();
 
     new Setting(containerEl)
       .setName("停止時に自動で文字起こし")

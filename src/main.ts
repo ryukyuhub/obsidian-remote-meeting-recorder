@@ -116,8 +116,6 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
 
     // 起動時: 孤児掃除 → セッション復元（設計書 §7）
     this.app.workspace.onLayoutReady(() => this.restoreSessions());
-
-    console.log("[remote-meeting-recorder] loaded");
   }
 
   onunload(): void {
@@ -128,7 +126,6 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
     this.controlWindow?.destroy();
     this.controlWindow = null;
     this.stopMicTap();
-    console.log("[remote-meeting-recorder] unloaded（録音プロセスは継続）");
   }
 
   // ================================================================

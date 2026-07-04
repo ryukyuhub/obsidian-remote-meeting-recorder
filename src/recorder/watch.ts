@@ -14,7 +14,7 @@ export type TerminalHandler = (ev: TerminalEvent) => void;
  * fs.watch ではなく poll（sleep/wake をまたぐ append に強い・elapsed 時計にも必要）。
  */
 export class SessionWatcher {
-  private timer: ReturnType<typeof setInterval> | null = null;
+  private timer: number | null = null;
   private tick = 0;
   private finalizing = false;
 
@@ -27,14 +27,14 @@ export class SessionWatcher {
 
   start(): void {
     if (this.timer) return;
-    this.timer = setInterval(() => void this.onInterval(), 1000);
+    this.timer = window.setInterval(() => void this.onInterval(), 1000);
     void this.onInterval(); // 即時 1 回
   }
 
   /** interval を止めるだけ（sysrec は殺さない・設計書 §6-7）。 */
   stop(): void {
     if (this.timer) {
-      clearInterval(this.timer);
+      window.clearInterval(this.timer);
       this.timer = null;
     }
   }

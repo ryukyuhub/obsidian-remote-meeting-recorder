@@ -1,7 +1,7 @@
 import * as path from "path";
 import { getElectronRemote } from "../platform/electron";
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
+/* eslint-disable @typescript-eslint/no-explicit-any -- Electron の remote API（BrowserWindow/ipcMain 等）は型情報が乏しく any 経由で扱う */
 
 export interface ControlWindowConfig {
   source: string;
@@ -24,7 +24,7 @@ export class ControlWindowManager {
   private win: any = null;
   private ipcMain: any = null;
   private stopHandler: ((...args: any[]) => void) | null = null;
-  private levelTimer: ReturnType<typeof setInterval> | null = null;
+  private levelTimer: number | null = null;
 
   constructor(private pluginDir: string) {}
 
@@ -100,7 +100,7 @@ export class ControlWindowManager {
     }
 
     // レベル送出（親 → 子・~16fps）
-    this.levelTimer = setInterval(() => this.safeSend(CH_LEVEL, getLevel()), 60);
+    this.levelTimer = window.setInterval(() => this.safeSend(CH_LEVEL, getLevel()), 60);
 
     this.win.on("closed", () => this.cleanup());
     return true;
@@ -139,7 +139,7 @@ export class ControlWindowManager {
 
   private cleanup(): void {
     if (this.levelTimer) {
-      clearInterval(this.levelTimer);
+      window.clearInterval(this.levelTimer);
       this.levelTimer = null;
     }
     if (this.ipcMain && this.stopHandler) {

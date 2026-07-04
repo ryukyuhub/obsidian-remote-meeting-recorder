@@ -32,6 +32,9 @@ const result = await build({
   platform: "node",
   external: ["obsidian"],
   write: false,
+  // 本番コードは Obsidian レンダラ前提で window.setInterval 等を使う。
+  // Node で走る E2E では window を globalThis に橋渡しして同等に動かす。
+  banner: { js: "globalThis.window ??= globalThis;" },
 });
 const bundlePath = path.join(os.tmpdir(), `rmr-e2e-api-${process.pid}.mjs`);
 fs.writeFileSync(bundlePath, result.outputFiles[0].text);

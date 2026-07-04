@@ -2,8 +2,9 @@
   "id": "remote-meeting-recorder",
   "name": "Remote Meeting Recorder",
   "version": "0.1.0",
-  "minAppVersion": "1.5.0",
-  "description": "macOS のシステム音声（会議相手の声）とマイクを同時録音し、録音データを失わない堅牢さで Obsidian ノートに直結させる録音プラグイン。",
-  "author": "MOTOKI KYAN",
+  "minAppVersion": "1.7.2",
+  "description": "Record macOS system audio and your microphone together for meetings with crash-safe sessions, then embed the audio and a local transcript into your notes. Recording uses an external helper binary based on ScreenCaptureKit.",
+  "author": "Ryukyu HUB Inc.",
+  "authorUrl": "https://ryukyuhub.co.jp",
   "isDesktopOnly": true
 }

@@ -19,13 +19,13 @@ export class WaveformRenderer {
     if (this.raf) return;
     const loop = () => {
       this.draw();
-      this.raf = requestAnimationFrame(loop);
+      this.raf = window.requestAnimationFrame(loop);
     };
     loop();
   }
 
   stop(): void {
-    if (this.raf) cancelAnimationFrame(this.raf);
+    if (this.raf) window.cancelAnimationFrame(this.raf);
     this.raf = 0;
   }
 

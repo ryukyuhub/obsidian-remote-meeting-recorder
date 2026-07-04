@@ -7,6 +7,7 @@ yarn-error.log*
 main.js
 main.js.map
 *.tsbuildinfo
+build/
 
 # Swift 録音バイナリ（sysrec）のビルド成果物
 native/sysrec/sysrec

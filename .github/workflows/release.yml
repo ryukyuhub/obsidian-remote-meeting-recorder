@@ -1,0 +1,63 @@
+name: Release Obsidian plugin
+
+# Triggered by pushing a semver tag like `0.1.0` (no `v` prefix — required
+# by the Obsidian community plugin validator). Use `npm version <semver>`
+# locally to bump + tag, then `git push --follow-tags`. The repo's .npmrc
+# sets `tag-version-prefix=""` so `npm version` does not add `v`.
+on:
+  push:
+    tags:
+      - "[0-9]+.[0-9]+.[0-9]+"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - run: npm ci
+
+      - name: Build
+        env:
+          # esbuild の出力先を ./build に固定（開発機の root 出力ではなく）。
+          OUT_DIR: ./build
+        run: npm run build
+
+      - name: Verify build artifacts
+        run: |
+          test -f ./build/main.js
+          test -f ./build/manifest.json
+          test -f ./build/styles.css
+
+      # Attestation はリリース成功の必須条件ではない（codeload の一時障害で
+      # 失敗し得るため）。健康なら付く「ベストエフォート」運用にする。
+      - name: Attest build provenance
+        continue-on-error: true
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            ./build/main.js
+            ./build/styles.css
+            ./build/manifest.json
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          gh release create "$tag" \
+            --title="$tag" \
+            --generate-notes \
+            ./build/main.js \
+            ./build/manifest.json \
+            ./build/styles.css

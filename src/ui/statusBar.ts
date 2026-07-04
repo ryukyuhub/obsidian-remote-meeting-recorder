@@ -25,7 +25,7 @@ export class StatusBarController {
     this.el.setText(`● REC ${formatElapsed(elapsedSec)}`);
     this.el.removeClass("rmr-statusbar-warning");
     this.el.addClass("rmr-statusbar-active");
-    this.el.style.removeProperty("display");
+    this.el.removeClass("rmr-hidden");
   }
 
   /** mix 失敗（remix 待ち）表示。 */
@@ -33,7 +33,7 @@ export class StatusBarController {
     this.el.setText("⚠ remix needed");
     this.el.removeClass("rmr-statusbar-active");
     this.el.addClass("rmr-statusbar-warning");
-    this.el.style.removeProperty("display");
+    this.el.removeClass("rmr-hidden");
   }
 
   /** 非表示（録音していない）。 */
@@ -41,6 +41,6 @@ export class StatusBarController {
     this.el.setText("");
     this.el.removeClass("rmr-statusbar-active");
     this.el.removeClass("rmr-statusbar-warning");
-    this.el.style.display = "none";
+    this.el.addClass("rmr-hidden");
   }
 }

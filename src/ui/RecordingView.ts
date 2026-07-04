@@ -259,11 +259,11 @@ export class RecordingView extends ItemView {
     const sync = (): void => {
       if (this.vEmbedFile) {
         pickBtn.setText(this.vEmbedFile.basename);
-        clearBtn.style.removeProperty("display");
+        clearBtn.removeClass("rmr-hidden");
         hint.setText("");
       } else {
         pickBtn.setText("ノートを選択…");
-        clearBtn.style.display = "none";
+        clearBtn.addClass("rmr-hidden");
         hint.setText("未選択のまま録音すると埋め込みしません");
       }
     };

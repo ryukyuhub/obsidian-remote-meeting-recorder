@@ -4,7 +4,7 @@ import type RemoteMeetingRecorderPlugin from "../main";
 import { getVaultBasePath } from "../context";
 import { getElectronRemote } from "../platform/electron";
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
+/* eslint-disable @typescript-eslint/no-explicit-any -- Electron の remote.dialog は型情報が乏しく any 経由で扱う */
 
 interface Choice {
   label: string;

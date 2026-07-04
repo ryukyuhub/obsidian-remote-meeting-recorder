@@ -119,6 +119,10 @@
   color: var(--text-muted);
   font-size: 0.9em;
 }
+/* 表示/非表示の共通ユーティリティ（JS からの直接 style 操作を避ける） */
+.rmr-hidden {
+  display: none;
+}
 /* 埋め込み先の行: 狭いサイドバーでボタン・注記が折り返せるように */
 .rmr-embed-control {
   flex-wrap: wrap;
