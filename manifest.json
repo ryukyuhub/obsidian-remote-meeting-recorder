@@ -1,0 +1,9 @@
+{
+  "id": "remote-meeting-recorder",
+  "name": "Remote Meeting Recorder",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "macOS のシステム音声（会議相手の声）とマイクを同時録音し、録音データを失わない堅牢さで Obsidian ノートに直結させる録音プラグイン。",
+  "author": "MOTOKI KYAN",
+  "isDesktopOnly": true
+}

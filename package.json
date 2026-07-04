@@ -1,0 +1,28 @@
+{
+  "name": "remote-meeting-recorder",
+  "version": "0.1.0",
+  "description": "リモート会議録音プラグイン（macOS システム音声＋マイク・堅牢セッション管理）",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+    "build-sysrec": "sh native/sysrec/build.sh sysrec",
+    "test:e2e": "node test/e2e.mjs"
+  },
+  "keywords": [
+    "obsidian",
+    "meeting",
+    "recorder",
+    "macos"
+  ],
+  "author": "MOTOKI KYAN",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "builtin-modules": "^3.3.0",
+    "esbuild": "0.21.5",
+    "obsidian": "^1.5.0",
+    "tslib": "^2.6.3",
+    "typescript": "^5.4.5"
+  }
+}

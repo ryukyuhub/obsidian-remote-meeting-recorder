@@ -1,0 +1,151 @@
+/* Remote Meeting Recorder スタイル */
+
+/* --- ステータスバー --- */
+.rmr-statusbar {
+  cursor: pointer;
+}
+.rmr-statusbar-active {
+  color: var(--color-red);
+  font-weight: 600;
+}
+.rmr-statusbar-warning {
+  color: var(--color-orange);
+  font-weight: 600;
+}
+
+/* --- 録音ビュー --- */
+.rmr-view {
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.rmr-title-input {
+  width: 100%;
+  font-size: 1.2em;
+  font-weight: 600;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--background-modifier-border);
+  padding: 4px 0;
+}
+.rmr-title-static {
+  font-size: 1.2em;
+  font-weight: 600;
+}
+.rmr-wave {
+  height: 72px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--background-secondary);
+  border-radius: 8px;
+}
+.rmr-canvas {
+  width: 100%;
+  height: 100%;
+}
+.rmr-wave-msg {
+  color: var(--text-muted);
+  font-size: 0.9em;
+}
+.rmr-timer {
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  font-size: 1.6em;
+  font-weight: 600;
+}
+.rmr-transport {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+}
+.rmr-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 14px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.rmr-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.rmr-btn-rec {
+  color: var(--color-red);
+}
+.rmr-btn-stop {
+  color: var(--text-normal);
+}
+.rmr-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px solid var(--background-modifier-border);
+  padding-top: 10px;
+}
+.rmr-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.rmr-row-label {
+  width: 84px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+.rmr-row-control {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.rmr-radios {
+  gap: 14px;
+}
+.rmr-radio {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+}
+.rmr-save-input {
+  flex: 1;
+}
+.rmr-hint,
+.rmr-static {
+  color: var(--text-muted);
+  font-size: 0.9em;
+}
+.rmr-consent {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+}
+.rmr-recording-note {
+  color: var(--text-muted);
+  font-size: 0.9em;
+}
+.rmr-warn {
+  color: var(--color-orange);
+  font-size: 0.85em;
+}
+
+/* --- 診断モーダル --- */
+.rmr-doctor .setting-item {
+  border-top: 1px solid var(--background-modifier-border);
+}
+.rmr-doctor-ok .setting-item-name {
+  color: var(--color-green);
+}
+.rmr-doctor-ng .setting-item-name {
+  color: var(--color-red);
+}
+.rmr-doctor-warn .setting-item-name {
+  color: var(--color-orange);
+}
+.rmr-doctor-info .setting-item-name {
+  color: var(--text-muted);
+}

@@ -1,0 +1,350 @@
+import { MarkdownView, Notice, Plugin, TFile, WorkspaceLeaf, normalizePath } from "obsidian";
+import * as path from "path";
+import { DEFAULT_SETTINGS, RMRSettingTab, type RMRSettings } from "./settings";
+import { createContext, getVaultBasePath, type RecorderContext } from "./context";
+import { DoctorModal } from "./ui/DoctorModal";
+import { StatusBarController } from "./ui/statusBar";
+import { RecordingView, RECORDING_VIEW_TYPE } from "./ui/RecordingView";
+import type { RecorderSource, SessionMeta, StartOptions, TerminalEvent } from "./types";
+import { startRecording, StartError } from "./recorder/start";
+import { stopRecording } from "./recorder/stop";
+import { remix } from "./recorder/mix";
+import { restoreInProgressSessions } from "./recorder/restore";
+import { SessionWatcher } from "./recorder/watch";
+import { insertEmbed } from "./ui/embed";
+
+/** ビューが操作する前面録音の情報（primary）。 */
+export interface ActiveRecordingInfo {
+  sessionId: string;
+  source: RecorderSource;
+  agc: "on" | "off";
+  startedAt: number;
+  label?: string;
+}
+
+export interface StartFromViewInput {
+  source: RecorderSource;
+  saveDirDisplay: string;
+  filename: string;
+  agc: boolean;
+  label?: string;
+}
+
+export default class RemoteMeetingRecorderPlugin extends Plugin {
+  declare settings: RMRSettings;
+  statusBar!: StatusBarController;
+
+  activeRecording: ActiveRecordingInfo | null = null;
+
+  private watchers = new Map<string, SessionWatcher>();
+  private embedTargets = new Map<string, TFile | null>();
+  private handledTerminals = new Set<string>();
+  private recordingView: RecordingView | null = null;
+  private lastWarningSessionId: string | null = null;
+
+  async onload(): Promise<void> {
+    await this.loadSettings();
+
+    this.registerView(RECORDING_VIEW_TYPE, (leaf) => new RecordingView(leaf, this));
+    this.addSettingTab(new RMRSettingTab(this.app, this));
+
+    const statusEl = this.addStatusBarItem();
+    this.statusBar = new StatusBarController(statusEl);
+    this.statusBar.setClickHandler(() => void this.openRecordingView());
+
+    this.addRibbonIcon("circle-dot", "会議録音を開く", () => void this.openRecordingView());
+
+    this.addCommand({
+      id: "open-recording-view",
+      name: "録音ビューを開く",
+      callback: () => void this.openRecordingView(),
+    });
+    this.addCommand({
+      id: "start-recording",
+      name: "録音を開始（録音ビューを開く）",
+      callback: () => void this.openRecordingView(),
+    });
+    this.addCommand({
+      id: "stop-recording",
+      name: "録音を停止",
+      callback: () => void this.stopViaCommand(),
+    });
+    this.addCommand({
+      id: "remix-last-failed",
+      name: "失敗した録音を remix 復旧",
+      callback: () => void this.remixLastFailed(),
+    });
+    this.addCommand({
+      id: "run-doctor",
+      name: "診断を実行（doctor）",
+      callback: () => new DoctorModal(this.app, this).open(),
+    });
+
+    // 起動時: 孤児掃除 → セッション復元（設計書 §7）
+    this.app.workspace.onLayoutReady(() => this.restoreSessions());
+
+    console.log("[remote-meeting-recorder] loaded");
+  }
+
+  onunload(): void {
+    // 録音は殺さない。watcher の interval を止めるだけ（設計書 §6-7）。
+    for (const w of this.watchers.values()) w.stop();
+    this.watchers.clear();
+    console.log("[remote-meeting-recorder] unloaded（録音プロセスは継続）");
+  }
+
+  // ================================================================
+  // 設定・コンテキスト
+  // ================================================================
+  async loadSettings(): Promise<void> {
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+  }
+
+  async saveSettings(): Promise<void> {
+    await this.saveData(this.settings);
+  }
+
+  getPluginDir(): string {
+    const base = getVaultBasePath(this.app);
+    if (this.manifest.dir) {
+      return base ? path.join(base, this.manifest.dir) : this.manifest.dir;
+    }
+    const rel = path.join(this.app.vault.configDir, "plugins", this.manifest.id);
+    return base ? path.join(base, rel) : rel;
+  }
+
+  buildContext(): RecorderContext {
+    return createContext(this.app, this.settings, this.getPluginDir());
+  }
+
+  // ================================================================
+  // 録音ビュー
+  // ================================================================
+  registerRecordingView(view: RecordingView): void {
+    this.recordingView = view;
+  }
+  unregisterRecordingView(view: RecordingView): void {
+    if (this.recordingView === view) this.recordingView = null;
+  }
+
+  async openRecordingView(): Promise<void> {
+    const existing = this.app.workspace.getLeavesOfType(RECORDING_VIEW_TYPE);
+    if (existing.length > 0) {
+      this.app.workspace.revealLeaf(existing[0]);
+      return;
+    }
+    const leaf: WorkspaceLeaf | null = this.app.workspace.getLeaf(true);
+    await leaf.setViewState({ type: RECORDING_VIEW_TYPE, active: true });
+    this.app.workspace.revealLeaf(leaf);
+  }
+
+  // ================================================================
+  // 開始・停止（オーケストレーション）
+  // ================================================================
+  async startRecordingFromView(input: StartFromViewInput): Promise<void> {
+    const ctx = this.buildContext();
+    const saveDir = this.resolveSaveDir(input.saveDirDisplay);
+    const opts: StartOptions = {
+      source: input.source,
+      saveDir,
+      filename: input.filename,
+      agc: input.agc,
+      label: input.label,
+      micDevice: this.settings.inputDeviceUid || undefined,
+    };
+
+    // 埋め込み先ノートを開始時にキャプチャ（設計書 §9.4）
+    const startFile = this.app.workspace.getActiveViewOfType(MarkdownView)?.file ?? null;
+
+    let result;
+    try {
+      result = await startRecording(ctx, opts);
+    } catch (e) {
+      if (e instanceof StartError && e.logTail) {
+        new Notice(`録音を開始できませんでした:\n${e.message}\n---\n${e.logTail}`, 10000);
+      }
+      throw e;
+    }
+
+    this.embedTargets.set(result.sessionId, startFile);
+    const meta = result.meta; // 永続化された正の meta（startedAt 一貫）
+    this.activeRecording = {
+      sessionId: meta.id,
+      source: meta.source,
+      agc: meta.agc,
+      startedAt: meta.startedAt,
+      label: meta.label,
+    };
+    this.startWatcher(meta);
+    new Notice(`録音を開始しました（${input.source}）`);
+  }
+
+  private startWatcher(meta: SessionMeta): void {
+    const ctx = this.buildContext();
+    const watcher = new SessionWatcher(
+      ctx,
+      meta,
+      (elapsed) => this.onTick(meta.id, elapsed),
+      (ev) => this.handleTerminal(ev, meta.id)
+    );
+    this.watchers.set(meta.id, watcher);
+    watcher.start();
+  }
+
+  private onTick(sessionId: string, elapsedSec: number): void {
+    if (this.activeRecording?.sessionId !== sessionId) return;
+    this.statusBar.setRecording(elapsedSec);
+    this.recordingView?.setElapsed(elapsedSec);
+  }
+
+  async stopActiveRecording(): Promise<void> {
+    if (!this.activeRecording) return;
+    await this.stopSession(this.activeRecording.sessionId);
+  }
+
+  private async stopViaCommand(): Promise<void> {
+    if (!this.activeRecording && this.watchers.size === 0) {
+      new Notice("録音中のセッションはありません。");
+      return;
+    }
+    const id = this.activeRecording?.sessionId ?? this.watchers.keys().next().value;
+    if (id) await this.stopSession(id);
+  }
+
+  private async stopSession(id: string): Promise<void> {
+    // watcher を止めてから明示停止（二重 finalize/通知を防ぐ・finalize は冪等）
+    this.watchers.get(id)?.stop();
+    this.watchers.delete(id);
+    const ctx = this.buildContext();
+    const ev = await stopRecording(ctx, id);
+    this.handleTerminal(ev, id);
+  }
+
+  // ================================================================
+  // 終端イベント処理（明示停止・外部停止の合流点）
+  // ================================================================
+  private handleTerminal(ev: TerminalEvent, sessionId: string): void {
+    if (this.handledTerminals.has(sessionId)) return;
+    this.handledTerminals.add(sessionId);
+
+    this.watchers.get(sessionId)?.stop();
+    this.watchers.delete(sessionId);
+
+    const wasActive = this.activeRecording?.sessionId === sessionId;
+    if (wasActive) this.activeRecording = null;
+
+    switch (ev.event) {
+      case "stopped":
+      case "remixed":
+        if (wasActive) this.statusBar.clear();
+        new Notice(
+          `録音を保存しました${ev.durationSec ? `（${ev.durationSec}秒）` : ""}`
+        );
+        void this.maybeInsertEmbed(ev, sessionId);
+        break;
+      case "stop-warning":
+        this.lastWarningSessionId = sessionId;
+        if (wasActive) this.statusBar.setWarning();
+        new Notice(
+          `⚠ ${ev.message ?? "mix に失敗しました"}\n「失敗した録音を remix 復旧」で復旧できます。`,
+          10000
+        );
+        break;
+      case "remix-error":
+        this.lastWarningSessionId = sessionId;
+        new Notice(`⚠ remix に失敗しました: ${ev.message ?? ""}`, 10000);
+        break;
+      case "stop-error":
+        new Notice(`停止に失敗しました: ${ev.message ?? ""}`, 8000);
+        break;
+      case "start-error":
+        new Notice(`起動に失敗しました: ${ev.message ?? ""}`, 8000);
+        break;
+    }
+
+    this.recordingView?.onTerminal();
+    // 復旧完了したら handled をクリア（次の同一 id 再利用は無いが念のため保持しない）
+    if (ev.event === "remixed") this.handledTerminals.delete(sessionId);
+  }
+
+  private async maybeInsertEmbed(ev: TerminalEvent, sessionId: string): Promise<void> {
+    const target = this.embedTargets.get(sessionId) ?? null;
+    this.embedTargets.delete(sessionId);
+    if (!ev.path) return;
+    if (!this.settings.saveInVault || !this.settings.insertEmbedOnStop) return;
+    await insertEmbed(this.app, target, ev.path);
+  }
+
+  // ================================================================
+  // remix 復旧
+  // ================================================================
+  async remixLastFailed(): Promise<void> {
+    const id = this.lastWarningSessionId;
+    if (!id) {
+      new Notice("復旧対象の録音が見つかりません。");
+      return;
+    }
+    new Notice("remix を実行中…");
+    const ctx = this.buildContext();
+    // handled 済みでも remix はやり直せるよう解除
+    this.handledTerminals.delete(id);
+    const ev = await remix(ctx, { sessionId: id });
+    if (ev.event === "remixed") this.lastWarningSessionId = null;
+    this.handleTerminal(ev, id);
+  }
+
+  // ================================================================
+  // 復元
+  // ================================================================
+  private restoreSessions(): void {
+    const ctx = this.buildContext();
+    let result;
+    try {
+      result = restoreInProgressSessions(ctx);
+    } catch (e) {
+      console.error("[remote-meeting-recorder] restore 失敗", e);
+      return;
+    }
+
+    for (const meta of result.active) {
+      if (!this.activeRecording) {
+        this.activeRecording = {
+          sessionId: meta.id,
+          source: meta.source,
+          agc: meta.agc,
+          startedAt: meta.startedAt,
+          label: meta.label,
+        };
+      }
+      this.startWatcher(meta);
+    }
+    if (result.active.length > 0) {
+      new Notice(`録音中のセッションを ${result.active.length} 件復元しました。`);
+    }
+
+    for (const meta of result.needsRemix) {
+      this.lastWarningSessionId = meta.id;
+    }
+    if (result.needsRemix.length > 0) {
+      new Notice(
+        `⚠ 前回異常終了した録音が ${result.needsRemix.length} 件あります。` +
+          `「失敗した録音を remix 復旧」で復旧できます。`,
+        10000
+      );
+    }
+
+    this.recordingView?.refresh();
+  }
+
+  // ================================================================
+  // ヘルパー
+  // ================================================================
+  resolveSaveDir(display: string): string {
+    const value = (display || this.settings.defaultSaveDir || "Recordings").trim();
+    if (this.settings.saveInVault) {
+      const base = getVaultBasePath(this.app) ?? "";
+      return path.join(base, normalizePath(value));
+    }
+    return value;
+  }
+}

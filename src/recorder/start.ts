@@ -1,0 +1,145 @@
+import * as fs from "fs";
+import * as path from "path";
+import type { RecorderContext } from "../context";
+import type { SessionMeta, StartOptions } from "../types";
+import { sessionPaths, type SessionFilePaths } from "../state/paths";
+import { newSessionId, writeSessionMeta } from "../state/sessionStore";
+import { sweepOrphans } from "./sweep";
+import { isAlive, pollPidFile, spawnCaffeinate, spawnDetached } from "./spawn";
+import { defaultFilename } from "../util/time";
+import { ensureDir, exists, tailFile } from "../util/fsx";
+
+export interface StartResult {
+  sessionId: string;
+  out: string;
+  pid: number;
+  /** 永続化されたセッションメタ（startedAt を含む・watcher/UI はこれを正とする） */
+  meta: SessionMeta;
+}
+
+/** 起動失敗（ログ tail 付き）。UI は start-error として扱う。 */
+export class StartError extends Error {
+  logTail?: string;
+  constructor(message: string, logTail?: string) {
+    super(message);
+    this.name = "StartError";
+    this.logTail = logTail;
+  }
+}
+
+/**
+ * 録音開始（設計書 §5.2）。順序厳守:
+ * sweep → ensureDir → 保存先/ファイル名解決（.m4a 強制・衝突連番）→ status 空 truncate
+ * → argv → spawnDetached → pollPidFile → isAlive → 生存 OK のときだけ JSON → caffeinate。
+ * 失敗時は pid/status を rm し JSON は書かず、log tail を添えて throw。
+ */
+export async function startRecording(
+  ctx: RecorderContext,
+  o: StartOptions
+): Promise<StartResult> {
+  const bin = ctx.resolveBinPath();
+  if (!bin) {
+    throw new StartError(
+      "sysrec バイナリが見つかりません。設定または診断（doctor）で確認してください。"
+    );
+  }
+
+  // 1. 孤児掃除（開始前に状態をきれいにする）
+  sweepOrphans(ctx);
+
+  // 2. 保存先/ファイル名解決
+  ensureDir(o.saveDir);
+  const out = resolveOutPath(o.saveDir, o.filename);
+
+  // 3. セッション ID/パス、status を空初期化（sysrec が append する）
+  const id = newSessionId();
+  const sp = sessionPaths(ctx.paths, id);
+  ensureDir(ctx.paths.sessionsDir);
+  fs.writeFileSync(sp.status, "");
+
+  // 4. argv
+  const argv = buildArgv(ctx, o, out, sp.status, sp.pid);
+
+  // 5. 起動 → pidfile 待ち → 生存確認
+  let spawnedPid: number;
+  try {
+    spawnedPid = spawnDetached(bin, argv, sp.log);
+  } catch (e) {
+    cleanupFailed(sp);
+    throw new StartError(`起動に失敗しました: ${(e as Error).message}`, tailFile(sp.log, 20));
+  }
+  void spawnedPid; // pidfile 由来の pid を正とする
+
+  const polled = await pollPidFile(sp.pid, 30, 100);
+  if (polled == null || !isAlive(polled)) {
+    cleanupFailed(sp);
+    throw new StartError(
+      "録音プロセスの起動を確認できませんでした（画面収録権限やデバイスを確認してください）。",
+      tailFile(sp.log, 20)
+    );
+  }
+
+  // 6. 生存 OK → ここで初めて JSON を書く
+  const meta: SessionMeta = {
+    id,
+    pid: polled,
+    platform: "darwin",
+    source: o.source,
+    agc: o.agc ? "on" : "off",
+    out,
+    bin,
+    startedAt: Date.now(),
+    label: o.label,
+  };
+  writeSessionMeta(ctx.paths, meta);
+
+  // 7. スリープ抑止の保険（pid 終了で自動終了）
+  spawnCaffeinate(polled);
+
+  return { sessionId: id, out, pid: polled, meta };
+}
+
+/** 保存先＋ファイル名から最終 out パスを決める（.m4a 強制・衝突連番 2 始まり）。 */
+export function resolveOutPath(saveDir: string, filename: string): string {
+  let stem = (filename || "").trim().replace(/\.m4a$/i, "");
+  if (!stem) stem = defaultFilename();
+
+  let candidate = path.join(saveDir, `${stem}.m4a`);
+  let n = 2;
+  while (exists(candidate)) {
+    candidate = path.join(saveDir, `${stem}-${n}.m4a`);
+    n++;
+  }
+  return candidate;
+}
+
+function buildArgv(
+  ctx: RecorderContext,
+  o: StartOptions,
+  out: string,
+  statusPath: string,
+  pidPath: string
+): string[] {
+  const argv = [
+    "--out", out,
+    "--source", o.source,
+    "--samplerate", String(o.sampleRate ?? ctx.settings.sampleRate),
+    "--channels", String(o.channels ?? ctx.settings.channels),
+    "--agc", o.agc ? "on" : "off",
+    "--status-file", statusPath,
+    "--pidfile", pidPath,
+  ];
+  if (o.micDevice) argv.push("--mic-device", o.micDevice);
+  return argv;
+}
+
+/** 起動失敗時: pid/status を rm（JSON は書いていない・log は tail 用に残す）。 */
+function cleanupFailed(sp: SessionFilePaths): void {
+  for (const f of [sp.pid, sp.status]) {
+    try {
+      fs.unlinkSync(f);
+    } catch {
+      // 無視
+    }
+  }
+}
