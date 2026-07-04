@@ -4,6 +4,11 @@ name: Release Obsidian plugin
 # by the Obsidian community plugin validator). Use `npm version <semver>`
 # locally to bump + tag, then `git push --follow-tags`. The repo's .npmrc
 # sets `tag-version-prefix=""` so `npm version` does not add `v`.
+#
+# Runs on macOS because the `sysrec` recording helper is a Swift/ScreenCaptureKit
+# binary that only builds on macOS. The release attaches main.js / manifest.json /
+# styles.css (for BRAT) plus the ad-hoc-signed `sysrec` binary, which the plugin's
+# doctor panel can download with one click ("sysrec を取得").
 on:
   push:
     tags:
@@ -11,7 +16,7 @@ on:
 
 jobs:
   release:
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     permissions:
       contents: write
       id-token: write
@@ -27,17 +32,21 @@ jobs:
 
       - run: npm ci
 
-      - name: Build
+      - name: Build plugin
         env:
           # esbuild の出力先を ./build に固定（開発機の root 出力ではなく）。
           OUT_DIR: ./build
         run: npm run build
+
+      - name: Build sysrec helper (Swift / ScreenCaptureKit)
+        run: npm run build-sysrec
 
       - name: Verify build artifacts
         run: |
           test -f ./build/main.js
           test -f ./build/manifest.json
           test -f ./build/styles.css
+          test -f ./native/sysrec/sysrec
 
       # Attestation はリリース成功の必須条件ではない（codeload の一時障害で
       # 失敗し得るため）。健康なら付く「ベストエフォート」運用にする。
@@ -49,6 +58,7 @@ jobs:
             ./build/main.js
             ./build/styles.css
             ./build/manifest.json
+            ./native/sysrec/sysrec
 
       - name: Create GitHub release
         env:
@@ -60,4 +70,5 @@ jobs:
             --generate-notes \
             ./build/main.js \
             ./build/manifest.json \
-            ./build/styles.css
+            ./build/styles.css \
+            ./native/sysrec/sysrec

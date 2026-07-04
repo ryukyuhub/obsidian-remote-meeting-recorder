@@ -46,12 +46,20 @@ Apple の **ScreenCaptureKit** を使う小さな外部ヘルパー `sysrec`（S
 
 ### BRAT で導入（推奨）
 
+Xcode もターミナルも不要 — `sysrec` ヘルパーはワンクリックで取得できます。
+
 1. コミュニティプラグイン **BRAT** を導入。
 2. BRAT の「Add a beta plugin」に本リポジトリを追加:
    `ryukyuhub/obsidian-remote-meeting-recorder`。BRAT が最新リリースから
    `main.js` / `manifest.json` / `styles.css` を取得します。
-3. ヘルパーを一度ビルド（要 `swiftc`）: 導入されたプラグインフォルダで
-   `npm install && npm run build-sysrec` を実行し、Obsidian をリロード。
+3. プラグインを有効化し、設定の**診断（doctor）**を開く。`sysrec` が無ければ
+   **「sysrec を取得」**をクリック — 最新リリースから ad-hoc 署名済みヘルパーを
+   ダウンロードして配置します。
+4. 求められたら Obsidian に**画面収録**権限を付与。
+
+同梱の `sysrec` は ad-hoc 署名（未公証）です。HTTPS で取得され Obsidian から
+サブプロセスとして起動されます。この経路では Gatekeeper のダイアログは出ず、
+doctor がダウンロード後に隔離属性を除去します。
 
 ### ソースから
 

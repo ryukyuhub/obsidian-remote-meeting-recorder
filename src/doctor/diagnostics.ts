@@ -122,15 +122,36 @@ export function runDoctor(ctx: RecorderContext): DoctorCheck[] {
   const swiftBuildDir = path.join(ctx.pluginDir, "native", "sysrec");
   const buildScript = path.join(swiftBuildDir, "build.sh");
 
+  const sysrecTarget = path.join(swiftBuildDir, "sysrec");
+
   const buildFix: DoctorFix = {
     label: "sysrec をビルド",
     run: async () => {
-      const { stderr } = await execFileAsync(
-        "sh",
-        [buildScript, path.join(swiftBuildDir, "sysrec")],
-        { timeout: 120000 }
-      );
+      const { stderr } = await execFileAsync("sh", [buildScript, sysrecTarget], {
+        timeout: 120000,
+      });
       return stderr?.trim() || "ビルド完了。診断を再実行してください。";
+    },
+  };
+
+  // BRAT/自己配布向け: GitHub リリースの ad-hoc バイナリを取得して配置する。
+  // Xcode 不要。curl 取得なので隔離属性は付きにくいが、念のため xattr -c で除去。
+  const downloadFix: DoctorFix = {
+    label: "sysrec を取得",
+    run: async () => {
+      const url =
+        "https://github.com/ryukyuhub/obsidian-remote-meeting-recorder/releases/latest/download/sysrec";
+      fs.mkdirSync(swiftBuildDir, { recursive: true });
+      await execFileAsync("curl", ["-L", "--fail", "-o", sysrecTarget, url], {
+        timeout: 300000,
+      });
+      fs.chmodSync(sysrecTarget, 0o755);
+      try {
+        await execFileAsync("xattr", ["-c", sysrecTarget]);
+      } catch {
+        // 隔離属性が無い等は無視
+      }
+      return `取得完了: ${sysrecTarget}\n診断を再実行してください。`;
     },
   };
 
@@ -140,9 +161,11 @@ export function runDoctor(ctx: RecorderContext): DoctorCheck[] {
       label: "sysrec バイナリ",
       status: "ng",
       detail:
-        "見つかりません。native/sysrec/sysrec をビルドするか、設定でパスを指定してください。\n" +
+        "見つかりません。「sysrec を取得」でリリースからダウンロードするか、" +
+        "ソースがあれば npm run build-sysrec でビルドしてください。\n" +
         `探索: ${candidates.map((c) => `${c.origin}=${c.path}`).join(" / ")}`,
-      fix: fs.existsSync(buildScript) ? buildFix : undefined,
+      // ソース（build.sh）があればビルド、無ければ（BRAT 等）ダウンロードを提示。
+      fix: fs.existsSync(buildScript) ? buildFix : downloadFix,
     });
     // バイナリが無いと以降の署名/arch/quarantine/権限は不能
     checks.push(...stateAndTccChecks(ctx, null));

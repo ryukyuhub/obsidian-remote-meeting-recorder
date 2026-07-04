@@ -52,12 +52,20 @@ still build the `sysrec` helper once.
 
 ### Via BRAT (recommended)
 
+No Xcode or terminal needed — the `sysrec` helper is downloaded with one click.
+
 1. Install the **BRAT** community plugin.
 2. In BRAT, "Add a beta plugin" with this repository:
    `ryukyuhub/obsidian-remote-meeting-recorder`. BRAT installs `main.js`,
    `manifest.json`, and `styles.css` from the latest release.
-3. Build the helper once (needs `swiftc`): in the installed plugin folder, run
-   `npm install && npm run build-sysrec`. Then reload Obsidian.
+3. Enable the plugin, open its settings, and run **Diagnostics (doctor)**. If the
+   `sysrec` helper is missing, click **"sysrec を取得"** — it downloads the
+   ad-hoc-signed helper from the latest release and installs it.
+4. Grant **Screen Recording** permission to Obsidian when prompted.
+
+The bundled `sysrec` is ad-hoc signed (not notarized). It is fetched over HTTPS
+and run as a subprocess by Obsidian; macOS does not prompt for Gatekeeper in this
+path, and the doctor clears any quarantine attribute after download.
 
 ### From source
 
