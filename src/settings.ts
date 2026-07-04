@@ -309,9 +309,27 @@ export class RMRSettingTab extends PluginSettingTab {
         })
       );
 
+    new Setting(containerEl)
+      .setName("Whisper モデル")
+      .setDesc(
+        "精度と速度のトレードオフ。CPU のみで遅い場合は small / base が速い。" +
+          "変更したら「診断（doctor）」でモデルを取得してください。"
+      )
+      .addDropdown((d) =>
+        d
+          .addOption("large-v3-turbo-q5_0", "large-v3-turbo（高精度・やや重い）")
+          .addOption("small", "small（速い・バランス）")
+          .addOption("base", "base（最速・軽量）")
+          .setValue(this.plugin.settings.whisperCppModel || "large-v3-turbo-q5_0")
+          .onChange(async (v) => {
+            this.plugin.settings.whisperCppModel = v;
+            await this.plugin.saveSettings();
+          })
+      );
+
     const whisperNote = containerEl.createEl("p", { cls: "rmr-settings-note" });
     whisperNote.setText(
-      "モデルと whisper.cpp バイナリは自動検出されます。モデルの入手・状態確認は「診断（doctor）」から行えます。"
+      "whisper.cpp バイナリは自動検出されます。選んだモデルの入手・状態確認は「診断（doctor）」から行えます。"
     );
 
     new Setting(containerEl)

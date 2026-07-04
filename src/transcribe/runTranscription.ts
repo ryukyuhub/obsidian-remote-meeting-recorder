@@ -25,16 +25,34 @@ export async function runTranscription(
   target: TFile | null
 ): Promise<void> {
   const s = plugin.settings;
-  const notice = new Notice("文字起こし中…", 0);
+  // 経過秒つきの進捗表示。whisper の % はバッファリングで遅れて届くため、秒カウンタで
+  // 常に「動いている」ことを見せる。モデル読込/デコード等の準備中も表示する。
+  const startedAt = Date.now();
+  let phase: "prep" | "run" = "prep";
+  let pct = -1;
+  const notice = new Notice("文字起こし準備中…", 0);
+  const render = (): string => {
+    const sec = Math.floor((Date.now() - startedAt) / 1000);
+    const t = `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")}`;
+    if (phase === "prep") return `文字起こし準備中…（${t}）`;
+    return pct >= 0 ? `文字起こし中… ${pct}%（${t}）` : `文字起こし中…（${t}）`;
+  };
+  const ticker = window.setInterval(() => notice.setMessage(render()), 1000);
   try {
-    const result = await transcribeViaWhisperCpp(plugin, audioPath);
+    const result = await transcribeViaWhisperCpp(plugin, audioPath, {
+      onRun: () => {
+        phase = "run";
+      },
+      onProgress: (p) => {
+        phase = "run";
+        pct = p;
+      },
+    });
 
     if (result == null) {
-      notice.hide();
       return; // エラーは各 backend 内で Notice 済み
     }
     if (!result.text.trim()) {
-      notice.hide();
       new Notice("文字起こし結果が空でした（無音の可能性）。");
       return;
     }
@@ -44,18 +62,54 @@ export async function runTranscription(
     // linkToDailyNote オン時はデイリーノートへ埋め込みリンクを別経路で追記済みなので二重埋め込みを避ける
     await appendResult(plugin.app, target, audioPath, md, !s.linkToDailyNote);
 
-    notice.hide();
     new Notice("文字起こしが完了しました。");
   } catch (e) {
-    notice.hide();
+    // Notice は表示が切れるため、原因追跡用にフルのエラー（whisper の stderr 含む）を console にも出す。
+    console.error("[remote-meeting-recorder] 文字起こしに失敗", e);
     new Notice(`文字起こしに失敗: ${(e as Error).message}`, 10000);
+  } finally {
+    window.clearInterval(ticker);
+    notice.hide();
+  }
+}
+
+interface TranscribeCallbacks {
+  /** whisper 実行フェーズに入ったとき（準備＝モデル読込/デコードが終わったとき）。 */
+  onRun?: () => void;
+  /** 進捗（0..100）。 */
+  onProgress?: (percent: number) => void;
+}
+
+/**
+ * whisper のモデルをローカルの状態ディレクトリにキャッシュして返す。
+ * G:（Google ドライブ）等の遅いドライブや日本語パスからの毎回読込を避け、読込を高速化する。
+ * コピー失敗時は元パスをそのまま返す（フォールバック）。
+ */
+async function ensureLocalModel(model: string, stateDir: string): Promise<string> {
+  try {
+    const cacheDir = path.join(stateDir, "whisper-cache");
+    await fs.promises.mkdir(cacheDir, { recursive: true });
+    const dest = path.join(cacheDir, path.basename(model));
+    const src = await fs.promises.stat(model);
+    let cached = false;
+    try {
+      const d = await fs.promises.stat(dest);
+      cached = d.size === src.size; // サイズ一致ならキャッシュ済みとみなす
+    } catch {
+      /* まだ無い */
+    }
+    if (!cached) await fs.promises.copyFile(model, dest);
+    return dest;
+  } catch {
+    return model;
   }
 }
 
 /** whisper.cpp（同梱バイナリ）で文字起こし。全文と録音長（16kHz PCM から算出）を返す。失敗時は Notice して null。 */
 async function transcribeViaWhisperCpp(
   plugin: RemoteMeetingRecorderPlugin,
-  audioPath: string
+  audioPath: string,
+  cb: TranscribeCallbacks = {}
 ): Promise<{ text: string; durationSec: number } | null> {
   const s = plugin.settings;
   const pluginDir = plugin.getPluginDir();
@@ -72,6 +126,8 @@ async function transcribeViaWhisperCpp(
     new Notice("Whisper モデルが見つかりません。診断（doctor）からダウンロードしてください。", 10000);
     return null;
   }
+  // モデルをローカルの状態ディレクトリにキャッシュ（G: 等の遅いドライブ・日本語パスを避け読込高速化）。
+  const localModel = await ensureLocalModel(model, plugin.buildContext().paths.stateDir);
 
   // m4a → 16kHz mono PCM → WAV（whisper.cpp は m4a 非対応・wav/flac/mp3/ogg のみ）
   const pcm = await decodeToPcm16k(readArrayBuffer(audioPath));
@@ -80,8 +136,11 @@ async function transcribeViaWhisperCpp(
   const base = path.join(os.tmpdir(), `rmr-tx-${process.pid}-${pcm.length}`);
   const wavPath = `${base}.wav`;
   fs.writeFileSync(wavPath, Buffer.from(wavBuf));
+  cb.onRun?.(); // 準備完了 → 実行フェーズへ
   try {
-    const text = await transcribeWav(bin, model, wavPath, s.transcribeLanguage || "auto", base);
+    const text = await transcribeWav(bin, localModel, wavPath, s.transcribeLanguage || "auto", base, {
+      onProgress: cb.onProgress,
+    });
     return { text, durationSec };
   } finally {
     try {
