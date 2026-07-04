@@ -47,6 +47,11 @@ export class SessionWatcher {
     const elapsed = (Date.now() - this.meta.startedAt) / 1000;
     this.onTick(elapsed);
 
+    // Windows（レンダラ内録音）は外部プロセスの pid/status-file を持たない。
+    // 終了検知は WebRecorder のイベント経由（main.ts の onWebTerminated）で行うため、
+    // ここでは elapsed の tick のみを担い、liveness/status ポーリングはしない。
+    if (this.meta.platform === "win32") return;
+
     this.tick++;
     if (this.tick % 3 !== 0) return;
 

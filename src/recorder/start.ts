@@ -99,15 +99,18 @@ export async function startRecording(
   return { sessionId: id, out, pid: polled, meta };
 }
 
-/** 保存先＋ファイル名から最終 out パスを決める（.m4a 強制・衝突連番 2 始まり）。 */
-export function resolveOutPath(saveDir: string, filename: string): string {
-  let stem = (filename || "").trim().replace(/\.m4a$/i, "");
+/**
+ * 保存先＋ファイル名から最終 out パスを決める（拡張子強制・衝突連番 2 始まり）。
+ * ext 既定は `.m4a`（macOS/sysrec）。Windows Web Audio 経路は mime に応じて `.m4a`/`.webm` を渡す。
+ */
+export function resolveOutPath(saveDir: string, filename: string, ext = ".m4a"): string {
+  let stem = (filename || "").trim().replace(/\.(m4a|mp4|webm)$/i, "");
   if (!stem) stem = defaultFilename();
 
-  let candidate = path.join(saveDir, `${stem}.m4a`);
+  let candidate = path.join(saveDir, `${stem}${ext}`);
   let n = 2;
   while (exists(candidate)) {
-    candidate = path.join(saveDir, `${stem}-${n}.m4a`);
+    candidate = path.join(saveDir, `${stem}-${n}${ext}`);
     n++;
   }
   return candidate;

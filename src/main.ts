@@ -7,6 +7,8 @@ import { StatusBarController } from "./ui/statusBar";
 import { RecordingView, RECORDING_VIEW_TYPE } from "./ui/RecordingView";
 import type { RecorderSource, SessionMeta, StartOptions, TerminalEvent } from "./types";
 import { startRecording, StartError } from "./recorder/start";
+import { startWebRecording } from "./recorder/startWeb";
+import type { WebRecorder } from "./recorder/webCapture";
 import { stopRecording } from "./recorder/stop";
 import { remix } from "./recorder/mix";
 import { restoreInProgressSessions } from "./recorder/restore";
@@ -14,7 +16,9 @@ import { SessionWatcher } from "./recorder/watch";
 import { insertEmbed, computeVaultRelative } from "./ui/embed";
 import { listMicDevices, type MicDevice } from "./recorder/devices";
 import { linkToDailyNote } from "./ui/dailyNote";
-import { rotateLogs } from "./state/sessionStore";
+import { rotateLogs, readSessionMeta, finalizeCleanup } from "./state/sessionStore";
+import { sessionPaths } from "./state/paths";
+import { statBytes } from "./util/fsx";
 import { WebAudioTap } from "./audio/webAudioTap";
 import { ControlWindowManager } from "./ui/controlWindow";
 import { runTranscription } from "./transcribe/runTranscription";
@@ -48,6 +52,8 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
   activeRecording: ActiveRecordingInfo | null = null;
 
   private watchers = new Map<string, SessionWatcher>();
+  // Windows(win32) のレンダラ内録音インスタンス（sessionId → WebRecorder）。真実の源はメモリ側。
+  private webRecorders = new Map<string, WebRecorder>();
   private embedTargets = new Map<string, TFile | null>();
   private handledTerminals = new Set<string>();
   private recordingView: RecordingView | null = null;
@@ -119,9 +125,19 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
   }
 
   onunload(): void {
-    // 録音は殺さない。watcher の interval を止めるだけ（設計書 §6-7）。
+    // macOS: 録音は殺さない。watcher の interval を止めるだけ（設計書 §6-7）。
     for (const w of this.watchers.values()) w.stop();
     this.watchers.clear();
+    // Windows: レンダラ内録音はプラグイン unload で生かし続けられない。graceful に停止して
+    // ファイルを確定する（best-effort。逐次追記済みなので最悪でも直近まで残る）。
+    for (const rec of this.webRecorders.values()) {
+      try {
+        void rec.stop();
+      } catch {
+        /* noop */
+      }
+    }
+    this.webRecorders.clear();
     // ミニ窓は残すとゾンビ化するので確実に破棄（表示専用・録音には非影響）
     this.controlWindow?.destroy();
     this.controlWindow = null;
@@ -209,11 +225,18 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
 
     let result;
     try {
-      result = await startRecording(ctx, opts);
-    } catch (e) {
-      if (e instanceof StartError && e.logTail) {
-        new Notice(`録音を開始できませんでした:\n${e.message}\n---\n${e.logTail}`, 10000);
+      if (process.platform === "win32") {
+        // Windows: 外部バイナリを使わずレンダラ内 Web Audio で録音する（Windows対応 実装計画）。
+        const r = await startWebRecording(ctx, opts, (id) => this.onWebTerminated(id));
+        this.webRecorders.set(r.sessionId, r.recorder);
+        result = r;
+      } else {
+        result = await startRecording(ctx, opts);
       }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      const tail = e instanceof StartError && e.logTail ? `\n---\n${e.logTail}` : "";
+      new Notice(`録音を開始できませんでした:\n${msg}${tail}`, 10000);
       throw e;
     }
 
@@ -227,7 +250,9 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
       label: meta.label,
     };
     this.startWatcher(meta);
-    if (meta.source !== "system") {
+    // Windows は WebRecorder 自身がマイクを取得済みで表示用レベルも出せるため、別タップを開かない
+    // （同一マイクの二重 getUserMedia を避ける）。macOS は従来どおり表示専用タップを使う。
+    if (meta.source !== "system" && process.platform !== "win32") {
       this.startMicTap(opts.micDevice, input.monitor ?? this.settings.monitor);
     }
     this.maybeOpenControlWindow();
@@ -252,8 +277,14 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
     this.micTap = null;
   }
 
-  /** 現在のマイク入力レベル（0..1・表示専用）。録音ビュー/ミニ窓が読む。 */
+  /** 現在の入力レベル（0..1・表示専用）。録音ビュー/ミニ窓が読む。 */
   getMicLevel(): number {
+    // Windows は録音中の WebRecorder からレベルを読む（マイクを別途開かない）。
+    const id = this.activeRecording?.sessionId;
+    if (id) {
+      const rec = this.webRecorders.get(id);
+      if (rec) return rec.getLevel();
+    }
     return this.micTap?.getLevel() ?? 0;
   }
 
@@ -299,8 +330,47 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
     this.watchers.get(id)?.stop();
     this.watchers.delete(id);
     const ctx = this.buildContext();
-    const ev = await stopRecording(ctx, id);
+    const meta = readSessionMeta(sessionPaths(ctx.paths, id).json);
+    const ev =
+      meta?.platform === "win32"
+        ? await this.stopWebSession(id)
+        : await stopRecording(ctx, id);
     this.handleTerminal(ev, id);
+  }
+
+  /** Windows(win32) セッションの停止・finalize。WebRecorder を止めてファイルサイズで成否判定。冪等。 */
+  private async stopWebSession(id: string): Promise<TerminalEvent> {
+    const rec = this.webRecorders.get(id);
+    this.webRecorders.delete(id);
+    const ctx = this.buildContext();
+    const meta = readSessionMeta(sessionPaths(ctx.paths, id).json);
+    if (rec) {
+      try {
+        await rec.stop();
+      } catch {
+        // 停止時の例外は握る（ファイルが残っていれば救う）
+      }
+    }
+    const out = meta?.out;
+    const bytes = out ? statBytes(out) : 0;
+    const durationSec = meta ? Math.round((Date.now() - meta.startedAt) / 1000) : undefined;
+    finalizeCleanup(ctx.paths, id); // json/pid/status を後始末（音声ファイル out は残す）
+    if (out && bytes > 0) {
+      return { event: "stopped", sessionId: id, source: meta?.source, path: out, bytes, durationSec };
+    }
+    return {
+      event: "stop-warning",
+      sessionId: id,
+      source: meta?.source,
+      message:
+        "録音データがありませんでした（マイクの許可、またはシステム音声の共有を確認してください）。",
+    };
+  }
+
+  /** WebRecorder が予期せず終了（トラック切断・録音エラー）したときの合流点。明示停止と冪等。 */
+  private onWebTerminated(id: string): void {
+    if (this.handledTerminals.has(id) || !this.webRecorders.has(id)) return;
+    void this.stopWebSession(id).then((ev) => this.handleTerminal(ev, id));
   }
 
   // ================================================================
@@ -493,6 +563,14 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
         `⚠ 前回異常終了した録音が ${result.needsRemix.length} 件あります。` +
           `「失敗した録音を remix 復旧」で復旧できます。`,
         10000
+      );
+    }
+
+    // Windows のレンダラ内録音は再起動をまたげない。中断分は部分ファイルが保存済み。
+    if (result.interruptedWeb.length > 0) {
+      new Notice(
+        `前回中断された録音が ${result.interruptedWeb.length} 件ありました（部分ファイルは保存済みです）。`,
+        8000
       );
     }
 

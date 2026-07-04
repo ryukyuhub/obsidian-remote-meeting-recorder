@@ -5,6 +5,8 @@ import * as path from "path";
 import * as fs from "fs";
 import type { RecorderContext } from "../context";
 import { binCandidates } from "../util/resolveBin";
+import { getElectronRemote } from "../platform/electron";
+import { pickAudioFormat } from "../recorder/webCapture";
 import {
   resolveWhisperBin,
   resolveWhisperModel,
@@ -96,6 +98,9 @@ function checkStateDirWritable(dir: string): { ok: boolean; detail: string } {
  * バイナリ有無 / 実行可否 / 署名 / arch / quarantine / 状態ディレクトリ / macOS / TCC 案内。
  */
 export function runDoctor(ctx: RecorderContext): DoctorCheck[] {
+  // Windows は録音経路（Web Audio / ループバック）が macOS と別なので専用の診断に分岐する。
+  if (process.platform === "win32") return windowsDoctor(ctx);
+
   const checks: DoctorCheck[] = [];
 
   // 1. macOS バージョン
@@ -256,6 +261,74 @@ export function runDoctor(ctx: RecorderContext): DoctorCheck[] {
   checks.push(...stateAndTccChecks(ctx, binPath));
 
   // 9. 文字起こし（backend 別・Phase 6）
+  checks.push(...transcribeChecks(ctx));
+
+  return checks;
+}
+
+/**
+ * Windows 用の診断（Windows対応 実装計画 §Phase W3）。
+ * macOS 固有（sysrec/codesign/lipo/xattr/TCC）は該当しないため、ループバック可否・
+ * 録音フォーマット・マイク許可案内・状態ディレクトリ・文字起こしのみを見る。
+ */
+function windowsDoctor(ctx: RecorderContext): DoctorCheck[] {
+  const checks: DoctorCheck[] = [];
+
+  // 1. 対応 OS
+  checks.push({
+    id: "os",
+    label: "対応 OS",
+    status: "ok",
+    detail: `Windows（${os.release()}）。システム音声はループバックで取得します（外部バイナリ不要）。`,
+  });
+
+  // 2. システム音声（ループバック）= Electron メイン session へのアクセス可否
+  const remote = getElectronRemote() as unknown as {
+    getCurrentWebContents?: () => { session?: { setDisplayMediaRequestHandler?: unknown } };
+    session?: { defaultSession?: { setDisplayMediaRequestHandler?: unknown } };
+  } | null;
+  const session = remote?.getCurrentWebContents?.().session ?? remote?.session?.defaultSession;
+  const canLoopback = !!session && typeof session.setDisplayMediaRequestHandler === "function";
+  checks.push({
+    id: "loopback",
+    label: "システム音声（ループバック）",
+    status: canLoopback ? "ok" : "ng",
+    detail: canLoopback
+      ? "メインプロセスの session にアクセスできます（会議相手の声を録音できます）。"
+      : "Electron のメイン session にアクセスできませんでした。システム音声を録音できない可能性があります。",
+  });
+
+  // 3. 録音フォーマット（mp4/AAC 優先 → webm）
+  const fmt = pickAudioFormat();
+  checks.push({
+    id: "format",
+    label: "録音フォーマット",
+    status: fmt.mimeType ? "ok" : "warn",
+    detail: fmt.mimeType
+      ? `${fmt.mimeType}（${fmt.ext}）で録音します。`
+      : "対応フォーマットを判定できませんでした（webm で試行します）。",
+  });
+
+  // 4. マイク許可（Windows 設定の案内）
+  checks.push({
+    id: "mic-privacy",
+    label: "マイクの許可",
+    status: "info",
+    detail:
+      "マイクが録音できない場合は「Windows 設定 > プライバシーとセキュリティ > マイク」で" +
+      "「マイクへのアクセス」と「デスクトップ アプリにマイクへのアクセスを許可する」をオンにしてください。",
+  });
+
+  // 5. 状態ディレクトリの書き込み
+  const sw = checkStateDirWritable(ctx.paths.stateDir);
+  checks.push({
+    id: "statedir",
+    label: "状態ディレクトリの書き込み",
+    status: sw.ok ? "ok" : "ng",
+    detail: sw.detail,
+  });
+
+  // 6. 文字起こし（whisper.cpp・録音とは独立）
   checks.push(...transcribeChecks(ctx));
 
   return checks;

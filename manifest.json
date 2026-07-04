@@ -3,7 +3,7 @@
   "name": "Remote Meeting Recorder",
   "version": "0.1.3",
   "minAppVersion": "1.7.2",
-  "description": "Record macOS system audio and your microphone together for meetings with crash-safe sessions, then embed the audio and a local transcript into your notes. Recording uses an external helper binary based on ScreenCaptureKit.",
+  "description": "Record system audio and your microphone together for meetings, then embed the audio and a local transcript into your notes. macOS uses a crash-safe ScreenCaptureKit helper binary; Windows records in-app via WASAPI loopback.",
   "author": "Ryukyu HUB Inc.",
   "authorUrl": "https://ryukyuhub.co.jp",
   "isDesktopOnly": true

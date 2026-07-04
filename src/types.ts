@@ -10,7 +10,8 @@ export type RecorderSource = "both" | "system" | "mic";
 export interface SessionMeta {
   id: string;
   pid: number;
-  platform: "darwin";
+  /** darwin = sysrec 外部プロセス / win32 = レンダラ内 Web Audio 録音（WebRecorder） */
+  platform: "darwin" | "win32";
   source: RecorderSource;
   agc: "on" | "off";
   /** both のときは中間ファイルの base（拡張子込みの最終 .m4a パス）。single は最終ファイル。 */
