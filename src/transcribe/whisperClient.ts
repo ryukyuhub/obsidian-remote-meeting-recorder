@@ -18,22 +18,6 @@ export interface TranscribeResult {
   duration?: number;
 }
 
-export interface SummarizeResult {
-  summary: string;
-}
-
-export interface ActionsResult {
-  action_items?: Array<{ task?: string; owner?: string; due?: string; priority?: string }>;
-  decisions?: string[];
-  follow_ups?: string[];
-}
-
-export interface AiCreds {
-  provider: string;
-  apiKey: string;
-  model?: string;
-}
-
 export class WhisperClient {
   constructor(private baseUrl: string) {}
 
@@ -81,27 +65,5 @@ export class WhisperClient {
     };
     if (opts.model) body.model = opts.model;
     return (await this.postJson("/transcribe", body)) as TranscribeResult;
-  }
-
-  /** AI 要約（キーはクライアントが渡す＝サーバは保持しない）。 */
-  async summarize(transcript: string, ai: AiCreds): Promise<SummarizeResult> {
-    const body: Record<string, unknown> = {
-      transcript,
-      provider: ai.provider,
-      api_key: ai.apiKey,
-    };
-    if (ai.model) body.model = ai.model;
-    return (await this.postJson("/summarize", body)) as SummarizeResult;
-  }
-
-  /** アクションアイテム/決定事項/フォローアップ抽出。 */
-  async extractActions(transcript: string, ai: AiCreds): Promise<ActionsResult> {
-    const body: Record<string, unknown> = {
-      transcript,
-      provider: ai.provider,
-      api_key: ai.apiKey,
-    };
-    if (ai.model) body.model = ai.model;
-    return (await this.postJson("/extract-actions", body)) as ActionsResult;
   }
 }

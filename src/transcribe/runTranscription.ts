@@ -3,12 +3,10 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import type RemoteMeetingRecorderPlugin from "../main";
-import type { TranscriptPostAction } from "../settings";
 import { decodeToPcm16k, f32ToB64, pcmToWav } from "./pcm";
 import { WhisperClient } from "./whisperClient";
 import { transcribeWav } from "./whisperCppClient";
 import { resolveWhisperBin, resolveWhisperModel } from "./resolveWhisper";
-import { summarizeWithAnthropic } from "../ai/summarize";
 import { computeVaultRelative } from "../ui/embed";
 
 function readArrayBuffer(p: string): ArrayBuffer {
@@ -44,13 +42,7 @@ export async function runTranscription(
       return;
     }
 
-    let summaryMd = "";
-    const wantSummary = s.summarizeOnTranscribe && s.transcriptPostAction !== "transcript";
-    if (wantSummary) {
-      summaryMd = await summarize(plugin, text);
-    }
-
-    const md = buildMarkdown(s.transcriptPostAction, text.trim(), summaryMd, s.transcribeLanguage);
+    const md = buildMarkdown(text.trim(), s.transcribeLanguage);
     await appendResult(plugin.app, target, audioPath, md);
 
     notice.hide();
@@ -123,51 +115,9 @@ async function transcribeViaServer(
   return tr.text || "";
 }
 
-/** AI 要約（既定 Anthropic 直接 / openai・ollama はサーバ経由）。失敗は空文字。 */
-async function summarize(plugin: RemoteMeetingRecorderPlugin, text: string): Promise<string> {
-  const s = plugin.settings;
-  try {
-    if (s.aiProvider === "anthropic") {
-      if (!s.aiApiKey) {
-        new Notice("AI キーが未設定のため要約をスキップしました。");
-        return "";
-      }
-      return await summarizeWithAnthropic(text, {
-        provider: s.aiProvider,
-        apiKey: s.aiApiKey,
-        model: s.aiModel,
-        language: s.transcribeLanguage,
-      });
-    }
-    // openai / ollama はサーバ /summarize に委譲
-    const client = new WhisperClient(s.whisperServerUrl);
-    const sm = await client.summarize(text, {
-      provider: s.aiProvider,
-      apiKey: s.aiApiKey,
-      model: s.aiModel || undefined,
-    });
-    return sm.summary?.trim() ?? "";
-  } catch (e) {
-    new Notice(`要約に失敗（文字起こしは保存します）: ${(e as Error).message}`);
-    return "";
-  }
-}
-
-function buildMarkdown(
-  action: TranscriptPostAction,
-  text: string,
-  summaryMd: string,
-  lang?: string
-): string {
-  const out: string[] = [];
-  out.push(`\n> [!note] 文字起こし${lang && lang !== "auto" ? `（${lang}）` : ""}`);
-  if ((action === "summary" || action === "full") && summaryMd) {
-    out.push(`\n${summaryMd}`);
-  }
-  if (action === "transcript" || action === "full") {
-    out.push(`\n### 全文\n${text}`);
-  }
-  return out.join("\n") + "\n";
+function buildMarkdown(text: string, lang?: string): string {
+  const heading = `\n> [!note] 文字起こし${lang && lang !== "auto" ? `（${lang}）` : ""}`;
+  return `${heading}\n\n### 全文\n${text}\n`;
 }
 
 async function appendResult(

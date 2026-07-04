@@ -36,14 +36,8 @@ export interface RMRSettings {
   whisperCppModel: string;
   transcribeLanguage: string;
   translateToEnglish: boolean;
-  summarizeOnTranscribe: boolean;
-  aiProvider: string;
-  aiModel: string;
-  aiApiKey: string;
-  transcriptPostAction: TranscriptPostAction;
 }
 
-export type TranscriptPostAction = "transcript" | "summary" | "full";
 export type TranscribeBackend = "whispercpp" | "server";
 
 export const DEFAULT_SETTINGS: RMRSettings = {
@@ -70,11 +64,6 @@ export const DEFAULT_SETTINGS: RMRSettings = {
   whisperCppModel: "",
   transcribeLanguage: "ja",
   translateToEnglish: false,
-  summarizeOnTranscribe: false,
-  aiProvider: "anthropic",
-  aiModel: "",
-  aiApiKey: "",
-  transcriptPostAction: "full",
 };
 
 export class RMRSettingTab extends PluginSettingTab {
@@ -408,70 +397,5 @@ export class RMRSettingTab extends PluginSettingTab {
           })
       );
 
-    new Setting(containerEl)
-      .setName("ノートへの出力")
-      .setDesc("全文のみ / 要約のみ / 両方。")
-      .addDropdown((d) =>
-        d
-          .addOption("transcript", "全文のみ")
-          .addOption("summary", "要約のみ")
-          .addOption("full", "全文＋要約")
-          .setValue(this.plugin.settings.transcriptPostAction)
-          .onChange(async (v) => {
-            this.plugin.settings.transcriptPostAction = v as TranscriptPostAction;
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(containerEl)
-      .setName("AI 要約を生成")
-      .setDesc("文字起こし後に要約・アクションアイテムを抽出します（AI キーが必要）。")
-      .addToggle((t) =>
-        t.setValue(this.plugin.settings.summarizeOnTranscribe).onChange(async (v) => {
-          this.plugin.settings.summarizeOnTranscribe = v;
-          await this.plugin.saveSettings();
-        })
-      );
-
-    new Setting(containerEl)
-      .setName("AI プロバイダ")
-      .addDropdown((d) =>
-        d
-          .addOption("anthropic", "Anthropic（Claude）")
-          .addOption("openai", "OpenAI")
-          .addOption("ollama", "Ollama（ローカル）")
-          .setValue(this.plugin.settings.aiProvider)
-          .onChange(async (v) => {
-            this.plugin.settings.aiProvider = v;
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(containerEl)
-      .setName("AI モデル")
-      .setDesc("空欄はプロバイダ既定（Anthropic は claude-opus-4-8）。")
-      .addText((text) =>
-        text
-          .setPlaceholder("(既定)")
-          .setValue(this.plugin.settings.aiModel)
-          .onChange(async (v) => {
-            this.plugin.settings.aiModel = v.trim();
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(containerEl)
-      .setName("AI API キー")
-      .setDesc("要約用。サーバ経由で AI プロバイダに渡されます（Vault の設定に保存されます）。")
-      .addText((text) => {
-        text
-          .setPlaceholder("sk-ant-...")
-          .setValue(this.plugin.settings.aiApiKey)
-          .onChange(async (v) => {
-            this.plugin.settings.aiApiKey = v.trim();
-            await this.plugin.saveSettings();
-          });
-        text.inputEl.type = "password";
-      });
   }
 }
