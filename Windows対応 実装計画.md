@@ -61,8 +61,14 @@ Windows では Chromium/Electron が**システム音声（ループバック）
 - ✅ **W2 状態機械の win32 分岐**：`types.ts`（platform union）/ `start.ts`（resolveOutPath 拡張子引数）/ `watch.ts`（win32 は poll しない）/ `restore.ts`（win32 中断分の後始末）/ 新規 `startWeb.ts` / `main.ts`（起動・停止・onunload・レベル・復元通知の分岐）。
 - ✅ **W3 診断＋説明**：`diagnostics.ts` に `windowsDoctor`（macOS 専用 NG を撤廃）、`manifest.json` の説明更新。
 - ✅ **実機テスト**：Windows 実機で録音成功（2026-07-05）。診断も全項目グリーン（whisper 除く）。録音の核心は完成。
-- ⏳ **W4**：Windows 版 whisper-cli.exe（未着手）。診断の whisper メッセージが macOS 前提（`brew`）なのも W4 で修正。
+- 🔨 **W4（実装済み・実機未検証）**：`resolveWhisperBin` を Windows 対応（`whisper-cli.exe`＋`Release/` 候補＋native/whisper 浅い走査）。診断に「Windows 版 whisper を取得」導線（`ggml-org/whisper.cpp` の `whisper-bin-x64.zip` を `latest/download` から curl→tar 展開＝`Release/whisper-cli.exe`）。whisper メッセージも Windows 向けに修正。※VC++ 再頒布可能パッケージの要否は未確認（DLL 起動エラー時に案内）。
 - ⏳ **詰め（任意）**：マイクデバイス選択（win32 は `navigator.mediaDevices.enumerateDevices` 化）／音量バランス。
+
+### W4 の検証手順（Windows 実機）
+1. 新 `main.js` を配送 → プラグイン再読み込み
+2. 診断 →「Windows 版 whisper を取得」→ `native/whisper/Release/whisper-cli.exe` が展開される
+3. 再診断で「whisper.cpp バイナリ [OK]」を確認
+4. 既存 `.m4a` を「録音ファイルを文字起こし」、または `停止時に文字起こし`をオンにして録音 → 文字起こしがノートに入るか
 
 lint クリーン・`npm run build` 通過。配送は `\\wsl.localhost\AlmaLinux-10\home\candyma\obsidian-remote-meeting-recorder\` の `main.js`＋`manifest.json` を Vault の `plugins/remote-meeting-recorder\` へコピー。
 

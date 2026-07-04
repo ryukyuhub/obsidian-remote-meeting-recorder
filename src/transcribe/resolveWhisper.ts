@@ -50,21 +50,56 @@ export function whisperModelsDir(pluginDir: string): string {
   return path.join(whisperDir(pluginDir), "models");
 }
 
+/** native/whisper/ 以下を浅く走査して whisper-cli(.exe)/main(.exe) を探す（zip 展開のレイアウト差を吸収）。 */
+function shallowFindExe(root: string, names: string[], maxDepth: number): string | null {
+  const walk = (dir: string, depth: number): string | null => {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return null;
+    }
+    for (const e of entries) {
+      const p = path.join(dir, e.name);
+      if (e.isFile() && names.includes(e.name)) return p;
+    }
+    if (depth < maxDepth) {
+      for (const e of entries) {
+        if (e.isDirectory()) {
+          const found = walk(path.join(dir, e.name), depth + 1);
+          if (found) return found;
+        }
+      }
+    }
+    return null;
+  };
+  return walk(root, 0);
+}
+
 /**
- * whisper.cpp CLI を解決。優先: 設定 → native/whisper/(build/bin/)whisper-cli → PATH。
- * 見つからなければ ""。
+ * whisper.cpp CLI を解決。優先: 設定 → native/whisper/(build/bin/…)whisper-cli(.exe) → 浅い走査 → PATH。
+ * Windows は `whisper-cli.exe`、その他は `whisper-cli`。見つからなければ ""。
  */
 export function resolveWhisperBin(pluginDir: string, override: string): string {
   const ov = (override || "").trim();
   if (ov && isFile(ov)) return ov;
   const dir = whisperDir(pluginDir);
+  const win = process.platform === "win32";
+  const exe = win ? ".exe" : "";
   const candidates = [
-    path.join(dir, "whisper-cli"),
-    path.join(dir, "build", "bin", "whisper-cli"),
-    path.join(dir, "main"),
+    path.join(dir, `whisper-cli${exe}`),
+    path.join(dir, "build", "bin", `whisper-cli${exe}`),
+    path.join(dir, "build", "bin", "Release", `whisper-cli${exe}`),
+    path.join(dir, "Release", `whisper-cli${exe}`),
+    path.join(dir, `main${exe}`),
   ];
   for (const c of candidates) if (isFile(c)) return c;
-  return findOnPath(["whisper-cli", "whisper"]) ?? "";
+  if (win) {
+    // Windows のビルド済み zip は展開先の階層が版によって異なるため浅く走査する。
+    const found = shallowFindExe(dir, ["whisper-cli.exe", "main.exe"], 2);
+    if (found) return found;
+  }
+  return findOnPath(win ? ["whisper-cli.exe", "whisper.exe"] : ["whisper-cli", "whisper"]) ?? "";
 }
 
 /** モデル名/パスを ggml .bin の絶対パスへ解決。空指定は models/ 内の最初の ggml を採用。 */

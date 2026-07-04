@@ -10,6 +10,7 @@ import { pickAudioFormat } from "../recorder/webCapture";
 import {
   resolveWhisperBin,
   resolveWhisperModel,
+  whisperDir,
   whisperModelsDir,
   modelDownloadTarget,
 } from "../transcribe/resolveWhisper";
@@ -339,13 +340,40 @@ function transcribeChecks(ctx: RecorderContext): DoctorCheck[] {
   const s = ctx.settings;
   const out: DoctorCheck[] = [];
   const bin = resolveWhisperBin(ctx.pluginDir, s.whisperCppBinPath);
+  const isWin = process.platform === "win32";
+
+  // Windows: ggml-org/whisper.cpp の CPU 版 zip を native/whisper/ に取得＋展開する。
+  // 展開後は Release/whisper-cli.exe（同階層に必要 DLL 群）。Xcode/署名不要。
+  const winWhisperFix: DoctorFix = {
+    label: "Windows 版 whisper を取得",
+    run: async () => {
+      const dir = whisperDir(ctx.pluginDir);
+      fs.mkdirSync(dir, { recursive: true });
+      const zip = path.join(dir, "whisper-bin-x64.zip");
+      const url =
+        "https://github.com/ggml-org/whisper.cpp/releases/latest/download/whisper-bin-x64.zip";
+      await execFileAsync("curl", ["-L", "--fail", "-o", zip, url], { timeout: 600000 });
+      // Windows 10+ 同梱の tar.exe は zip を展開できる。
+      await execFileAsync("tar", ["-xf", zip, "-C", dir], { timeout: 120000 });
+      try {
+        fs.unlinkSync(zip);
+      } catch {
+        // 展開済みなので zip 削除失敗は無視
+      }
+      return "取得・展開しました（native/whisper/Release/whisper-cli.exe）。診断を再実行してください。";
+    },
+  };
+
   out.push({
     id: "whispercpp-bin",
     label: "whisper.cpp バイナリ",
     status: bin ? "ok" : "warn",
     detail: bin
       ? bin
-      : "見つかりません。`npm run build-whisper` でビルドするか `brew install whisper-cpp` してください。",
+      : isWin
+        ? "見つかりません。文字起こしを使う場合は「Windows 版 whisper を取得」で whisper.cpp（CPU 版）を取得できます。"
+        : "見つかりません。`npm run build-whisper` でビルドするか `brew install whisper-cpp` してください。",
+    fix: bin ? undefined : isWin ? winWhisperFix : undefined,
   });
 
   const model = resolveWhisperModel(ctx.pluginDir, s.whisperCppModel);
