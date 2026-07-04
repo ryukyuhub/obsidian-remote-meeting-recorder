@@ -6,7 +6,7 @@ import { DoctorModal } from "./ui/DoctorModal";
 import { StatusBarController } from "./ui/statusBar";
 import { RecordingView, RECORDING_VIEW_TYPE } from "./ui/RecordingView";
 import type { RecorderSource, SessionMeta, StartOptions, TerminalEvent } from "./types";
-import { startRecording, StartError } from "./recorder/start";
+import { startRecording, StartError, type StartResult } from "./recorder/start";
 import { startWebRecording } from "./recorder/startWeb";
 import type { WebRecorder } from "./recorder/webCapture";
 import { stopRecording } from "./recorder/stop";
@@ -252,6 +252,17 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
       throw e;
     }
 
+    this.activateSession(result, startFile, opts, input.monitor ?? this.settings.monitor);
+    new Notice(`録音を開始しました（${input.source}）`);
+  }
+
+  /** 起動成功後のアクティブ化: 埋め込み先控え・状態設定・watcher/マイクタップ/ミニ窓の起動。 */
+  private activateSession(
+    result: StartResult,
+    startFile: TFile | null,
+    opts: StartOptions,
+    monitor: boolean
+  ): void {
     this.embedTargets.set(result.sessionId, startFile);
     const meta = result.meta; // 永続化された正の meta（startedAt 一貫）
     this.activeRecording = {
@@ -265,10 +276,9 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
     // Windows は WebRecorder 自身がマイクを取得済みで表示用レベルも出せるため、別タップを開かない
     // （同一マイクの二重 getUserMedia を避ける）。macOS は従来どおり表示専用タップを使う。
     if (meta.source !== "system" && process.platform !== "win32") {
-      this.startMicTap(opts.micDevice, input.monitor ?? this.settings.monitor);
+      this.startMicTap(opts.micDevice, monitor);
     }
     this.maybeOpenControlWindow();
-    new Notice(`録音を開始しました（${input.source}）`);
   }
 
   // ================================================================
@@ -404,20 +414,9 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
 
     switch (ev.event) {
       case "stopped":
-      case "remixed": {
-        if (wasActive) this.statusBar.clear();
-        new Notice(
-          `録音を保存しました${ev.durationSec ? `（${ev.durationSec}秒）` : ""}`
-        );
-        // 埋め込み先ノートは maybeInsertEmbed が消費するので先に控える（文字起こしの追記先）
-        const embedTarget = this.embedTargets.get(sessionId) ?? null;
-        void this.maybeInsertEmbed(ev, sessionId);
-        this.emitFinalized(ev); // 外部フック点（設計書 §13）
-        if (this.settings.transcribeOnStop && ev.path) {
-          void runTranscription(this, ev.path, embedTarget); // Phase 6 一括文字起こし
-        }
+      case "remixed":
+        this.finalizeSaved(ev, sessionId, wasActive);
         break;
-      }
       case "stop-warning":
         this.lastWarningSessionId = sessionId;
         if (wasActive) this.statusBar.setWarning();
@@ -441,6 +440,19 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
     this.recordingView?.onTerminal();
     // 復旧完了したら handled をクリア（次の同一 id 再利用は無いが念のため保持しない）
     if (ev.event === "remixed") this.handledTerminals.delete(sessionId);
+  }
+
+  /** 保存成功（stopped/remixed）: 埋め込み・外部フック・自動文字起こし。 */
+  private finalizeSaved(ev: TerminalEvent, sessionId: string, wasActive: boolean): void {
+    if (wasActive) this.statusBar.clear();
+    new Notice(`録音を保存しました${ev.durationSec ? `（${ev.durationSec}秒）` : ""}`);
+    // 埋め込み先ノートは maybeInsertEmbed が消費するので先に控える（文字起こしの追記先）
+    const embedTarget = this.embedTargets.get(sessionId) ?? null;
+    void this.maybeInsertEmbed(ev, sessionId);
+    this.emitFinalized(ev); // 外部フック点（設計書 §13）
+    if (this.settings.transcribeOnStop && ev.path) {
+      void runTranscription(this, ev.path, embedTarget); // Phase 6 一括文字起こし
+    }
   }
 
   private async maybeInsertEmbed(ev: TerminalEvent, sessionId: string): Promise<void> {
