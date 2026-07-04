@@ -193,18 +193,34 @@ export function runDoctor(ctx: RecorderContext): DoctorCheck[] {
     detail: `検出: ${binPath}（${found.origin}）`,
   });
 
+  // 3〜6.5 バイナリのプローブ（実行権限/署名/arch/quarantine/デバイス）
+  checks.push(...binaryProbeChecks(binPath, found.executable));
+
+  // 7. 状態ディレクトリ / 8. TCC（実バイナリで権限プリフライト）
+  checks.push(...stateAndTccChecks(ctx, binPath));
+
+  // 9. 文字起こし（backend 別・Phase 6）
+  checks.push(...transcribeChecks(ctx));
+
+  return checks;
+}
+
+/** バイナリ検出後のプローブ: 実行権限 / 署名 / arch / quarantine / 入力デバイス。 */
+function binaryProbeChecks(binPath: string, executable: boolean): DoctorCheck[] {
+  const out: DoctorCheck[] = [];
+
   // 3. 実行可否（X_OK）
-  checks.push({
+  out.push({
     id: "executable",
     label: "実行権限（X_OK）",
-    status: found.executable ? "ok" : "ng",
-    detail: found.executable ? "実行可能" : "実行権限がありません（chmod +x が必要）",
+    status: executable ? "ok" : "ng",
+    detail: executable ? "実行可能" : "実行権限がありません（chmod +x が必要）",
   });
 
   // 4. 署名（codesign -dv）
   const cs = tryExecSync("codesign", ["-dv", binPath]);
   const csText = (cs.stderr || cs.stdout).trim();
-  checks.push({
+  out.push({
     id: "codesign",
     label: "コード署名",
     status: cs.ok ? "ok" : "warn",
@@ -217,7 +233,7 @@ export function runDoctor(ctx: RecorderContext): DoctorCheck[] {
   const arch = tryExecSync("lipo", ["-archs", binPath]);
   const archText = arch.stdout.trim() || arch.stderr.trim();
   const hasArm = /arm64/.test(archText);
-  checks.push({
+  out.push({
     id: "arch",
     label: "アーキテクチャ",
     status: arch.ok ? (hasArm ? "ok" : "warn") : "warn",
@@ -228,7 +244,7 @@ export function runDoctor(ctx: RecorderContext): DoctorCheck[] {
 
   // 6. quarantine 属性
   const quar = tryExecSync("xattr", ["-p", "com.apple.quarantine", binPath]);
-  checks.push({
+  out.push({
     id: "quarantine",
     label: "quarantine 属性",
     status: quar.ok ? "warn" : "ok",
@@ -264,15 +280,9 @@ export function runDoctor(ctx: RecorderContext): DoctorCheck[] {
       // JSON でない = 古いバイナリ
     }
   }
-  checks.push({ id: "devices", label: "入力デバイス", status: deviceStatus, detail: deviceDetail });
+  out.push({ id: "devices", label: "入力デバイス", status: deviceStatus, detail: deviceDetail });
 
-  // 7. 状態ディレクトリ / 8. TCC（実バイナリで権限プリフライト）
-  checks.push(...stateAndTccChecks(ctx, binPath));
-
-  // 9. 文字起こし（backend 別・Phase 6）
-  checks.push(...transcribeChecks(ctx));
-
-  return checks;
+  return out;
 }
 
 /**

@@ -80,6 +80,15 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
 
     this.addRibbonIcon("circle-dot", "会議録音を開く", () => void this.openRecordingView());
 
+    this.registerCommands();
+    this.registerFileMenu();
+
+    // 起動時: 孤児掃除 → セッション復元（設計書 §7）
+    this.app.workspace.onLayoutReady(() => this.restoreSessions());
+  }
+
+  /** コマンドパレットのコマンドを登録。 */
+  private registerCommands(): void {
     this.addCommand({
       id: "open-recording-view",
       name: "録音ビューを開く",
@@ -110,8 +119,10 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
       name: "診断を実行（doctor）",
       callback: () => new DoctorModal(this.app, this).open(),
     });
+  }
 
-    // ノート（.md）右クリック → 「ここに会議録音を埋め込む」
+  /** ノート（.md）右クリック → 「ここに会議録音を埋め込む」。 */
+  private registerFileMenu(): void {
     this.registerEvent(
       this.app.workspace.on("file-menu", (menu, file) => {
         if (!(file instanceof TFile) || file.extension !== "md") return;
@@ -123,9 +134,6 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
         );
       })
     );
-
-    // 起動時: 孤児掃除 → セッション復元（設計書 §7）
-    this.app.workspace.onLayoutReady(() => this.restoreSessions());
   }
 
   onunload(): void {

@@ -140,22 +140,14 @@ export class RecordingView extends ItemView {
 
     // --- トランスポート ---
     const transport = root.createDiv({ cls: "rmr-transport" });
-    const recBtn = transport.createEl("button", { cls: "rmr-btn rmr-btn-rec" });
-    setIcon(recBtn.createSpan(), "circle");
-    recBtn.createSpan({ text: " 録音" });
-    recBtn.disabled = this.recording;
-    recBtn.addEventListener("click", () => void this.onRecord());
-
-    const pauseBtn = transport.createEl("button", { cls: "rmr-btn rmr-btn-pause" });
-    setIcon(pauseBtn.createSpan(), "pause");
-    pauseBtn.disabled = true;
+    this.addTransportButton(transport, "rmr-btn-rec", "circle", " 録音", this.recording, () =>
+      void this.onRecord()
+    );
+    const pauseBtn = this.addTransportButton(transport, "rmr-btn-pause", "pause", "", true);
     pauseBtn.setAttr("title", "一時停止は今後のバージョンで対応します");
-
-    const stopBtn = transport.createEl("button", { cls: "rmr-btn rmr-btn-stop" });
-    setIcon(stopBtn.createSpan(), "square");
-    stopBtn.createSpan({ text: " 停止" });
-    stopBtn.disabled = !this.recording;
-    stopBtn.addEventListener("click", () => void this.onStop());
+    this.addTransportButton(transport, "rmr-btn-stop", "square", " 停止", !this.recording, () =>
+      void this.onStop()
+    );
 
     // --- 設定パネル ---
     const panel = root.createDiv({ cls: "rmr-panel" });
@@ -198,10 +190,33 @@ export class RecordingView extends ItemView {
     }
   }
 
-  private buildSourceRow(panel: HTMLElement, locked: boolean): void {
+  /** 設定パネルの1行（ラベル＋コントロール枠）を作り、コントロール枠を返す。 */
+  private addRow(panel: HTMLElement, label: string, controlCls?: string): HTMLElement {
     const row = panel.createDiv({ cls: "rmr-row" });
-    row.createDiv({ cls: "rmr-row-label", text: "Source" });
-    const opts = row.createDiv({ cls: "rmr-row-control rmr-radios" });
+    row.createDiv({ cls: "rmr-row-label", text: label });
+    const cls = controlCls ? `rmr-row-control ${controlCls}` : "rmr-row-control";
+    return row.createDiv({ cls });
+  }
+
+  /** トランスポートボタン（アイコン＋任意ラベル）を作る。text 空ならアイコンのみ。 */
+  private addTransportButton(
+    parent: HTMLElement,
+    cls: string,
+    icon: string,
+    text: string,
+    disabled: boolean,
+    onClick?: () => void
+  ): HTMLButtonElement {
+    const btn = parent.createEl("button", { cls: `rmr-btn ${cls}` });
+    setIcon(btn.createSpan(), icon);
+    if (text) btn.createSpan({ text });
+    btn.disabled = disabled;
+    if (onClick) btn.addEventListener("click", onClick);
+    return btn;
+  }
+
+  private buildSourceRow(panel: HTMLElement, locked: boolean): void {
+    const opts = this.addRow(panel, "Source", "rmr-radios");
     const active = this.plugin.activeRecording;
     const current = active ? active.source : this.vSource;
     (["mic", "system", "both"] as RecorderSource[]).forEach((src) => {
@@ -217,9 +232,7 @@ export class RecordingView extends ItemView {
   }
 
   private buildSaveRow(panel: HTMLElement, locked: boolean): void {
-    const row = panel.createDiv({ cls: "rmr-row" });
-    row.createDiv({ cls: "rmr-row-label", text: "Save to" });
-    const control = row.createDiv({ cls: "rmr-row-control" });
+    const control = this.addRow(panel, "Save to");
     const input = control.createEl("input", {
       cls: "rmr-save-input",
       attr: { type: "text", placeholder: "Recordings" },
@@ -236,9 +249,7 @@ export class RecordingView extends ItemView {
   /** 埋め込み先ノートの選択。停止時埋め込みが有効なときだけ表示。未選択なら埋め込みしない。 */
   private buildEmbedRow(panel: HTMLElement): void {
     if (!this.plugin.settings.insertEmbedOnStop) return;
-    const row = panel.createDiv({ cls: "rmr-row" });
-    row.createDiv({ cls: "rmr-row-label", text: "埋め込み先" });
-    const control = row.createDiv({ cls: "rmr-row-control rmr-embed-control" });
+    const control = this.addRow(panel, "埋め込み先", "rmr-embed-control");
 
     const pickBtn = control.createEl("button", { cls: "rmr-embed-pick" });
     const clearBtn = control.createEl("button", { cls: "rmr-embed-clear", text: "×" });
@@ -273,9 +284,7 @@ export class RecordingView extends ItemView {
   }
 
   private buildInputRow(panel: HTMLElement, locked: boolean): void {
-    const row = panel.createDiv({ cls: "rmr-row" });
-    row.createDiv({ cls: "rmr-row-label", text: "Input" });
-    const control = row.createDiv({ cls: "rmr-row-control" });
+    const control = this.addRow(panel, "Input");
     const select = control.createEl("select", { cls: "rmr-select dropdown" });
     const optDefault = select.createEl("option", { text: "既定", value: "" });
     if (!this.vMicDevice) optDefault.selected = true;
@@ -288,9 +297,7 @@ export class RecordingView extends ItemView {
   }
 
   private buildMonitorRow(panel: HTMLElement): void {
-    const row = panel.createDiv({ cls: "rmr-row" });
-    row.createDiv({ cls: "rmr-row-label", text: "Monitor" });
-    const control = row.createDiv({ cls: "rmr-row-control" });
+    const control = this.addRow(panel, "Monitor");
     const cb = control.createEl("input", { attr: { type: "checkbox" } });
     cb.checked = this.vMonitor;
     cb.addEventListener("change", () => {
@@ -301,15 +308,11 @@ export class RecordingView extends ItemView {
   }
 
   private buildStaticRow(panel: HTMLElement, label: string, value: string): void {
-    const row = panel.createDiv({ cls: "rmr-row" });
-    row.createDiv({ cls: "rmr-row-label", text: label });
-    row.createDiv({ cls: "rmr-row-control rmr-static", text: value });
+    this.addRow(panel, label, "rmr-static").setText(value);
   }
 
   private buildAgcRow(panel: HTMLElement, locked: boolean): void {
-    const row = panel.createDiv({ cls: "rmr-row" });
-    row.createDiv({ cls: "rmr-row-label", text: "Auto gain" });
-    const control = row.createDiv({ cls: "rmr-row-control" });
+    const control = this.addRow(panel, "Auto gain");
     const active = this.plugin.activeRecording;
     const cb = control.createEl("input", { attr: { type: "checkbox" } });
     cb.checked = active ? active.agc === "on" : this.vAgc;
