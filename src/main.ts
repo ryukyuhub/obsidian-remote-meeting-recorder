@@ -19,6 +19,7 @@ import { WebAudioTap } from "./audio/webAudioTap";
 import { GlobalHotkeys } from "./platform/hotkeys";
 import { ControlWindowManager } from "./ui/controlWindow";
 import { getElectronRemote } from "./platform/electron";
+import { runTranscription } from "./transcribe/runTranscription";
 
 /** ビューが操作する前面録音の情報（primary）。 */
 export interface ActiveRecordingInfo {
@@ -295,14 +296,20 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
 
     switch (ev.event) {
       case "stopped":
-      case "remixed":
+      case "remixed": {
         if (wasActive) this.statusBar.clear();
         new Notice(
           `録音を保存しました${ev.durationSec ? `（${ev.durationSec}秒）` : ""}`
         );
+        // 埋め込み先ノートは maybeInsertEmbed が消費するので先に控える（文字起こしの追記先）
+        const embedTarget = this.embedTargets.get(sessionId) ?? null;
         void this.maybeInsertEmbed(ev, sessionId);
-        this.emitFinalized(ev); // 文字起こし等のフック点（設計書 §13・Phase 6）
+        this.emitFinalized(ev); // 外部フック点（設計書 §13）
+        if (this.settings.transcribeOnStop && ev.path) {
+          void runTranscription(this, ev.path, embedTarget); // Phase 6 一括文字起こし
+        }
         break;
+      }
       case "stop-warning":
         this.lastWarningSessionId = sessionId;
         if (wasActive) this.statusBar.setWarning();

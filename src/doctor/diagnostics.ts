@@ -226,7 +226,39 @@ export function runDoctor(ctx: RecorderContext): DoctorCheck[] {
   // 7. 状態ディレクトリ / 8. TCC（実バイナリで権限プリフライト）
   checks.push(...stateAndTccChecks(ctx, binPath));
 
+  // 9. Whisper サーバ（文字起こし・Phase 6）
+  checks.push(whisperCheck(ctx.settings.whisperServerUrl || "http://127.0.0.1:5678"));
+
   return checks;
+}
+
+/** Whisper サーバの /health を curl で叩いて疎通確認（文字起こしは任意なので未接続は warn）。 */
+function whisperCheck(baseUrl: string): DoctorCheck {
+  const healthUrl = baseUrl.replace(/\/+$/, "") + "/health";
+  const r = tryExecSync("curl", ["-s", "-m", "3", healthUrl]);
+  if (r.ok && r.stdout.trim()) {
+    try {
+      const j = JSON.parse(r.stdout) as { status?: string; model?: string; device?: string };
+      if (j && j.status) {
+        return {
+          id: "whisper",
+          label: "Whisper サーバ（文字起こし）",
+          status: "ok",
+          detail: `${baseUrl}\nmodel: ${j.model ?? "?"} / device: ${j.device ?? "?"}`,
+        };
+      }
+    } catch {
+      // JSON でない
+    }
+  }
+  return {
+    id: "whisper",
+    label: "Whisper サーバ（文字起こし）",
+    status: "warn",
+    detail:
+      `未接続: ${baseUrl}\n` +
+      "文字起こしを使う場合はローカル Whisper サーバ（MLX）を起動してください。",
+  };
 }
 
 function stateAndTccChecks(ctx: RecorderContext, binPath: string | null): DoctorCheck[] {

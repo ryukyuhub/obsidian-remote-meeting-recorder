@@ -1,0 +1,17 @@
+{
+  "binPath": "",
+  "defaultSaveDir": "Recordings",
+  "saveInVault": true,
+  "stateDir": "",
+  "sampleRate": 48000,
+  "channels": 2,
+  "defaultAgc": true,
+  "defaultSource": "both",
+  "monitor": false,
+  "inputDeviceUid": "",
+  "insertEmbedOnStop": true,
+  "linkToDailyNote": true,
+  "enableGlobalHotkey": false,
+  "globalHotkeyAccelerator": "CommandOrControl+Shift+R",
+  "enableControlWindow": true
+}

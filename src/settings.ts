@@ -24,7 +24,20 @@ export interface RMRSettings {
   enableGlobalHotkey: boolean;
   globalHotkeyAccelerator: string;
   enableControlWindow: boolean;
+  // 文字起こし（Phase 6・設計書 §15）
+  transcribeOnStop: boolean;
+  whisperServerUrl: string;
+  whisperModel: string;
+  transcribeLanguage: string;
+  translateToEnglish: boolean;
+  summarizeOnTranscribe: boolean;
+  aiProvider: string;
+  aiModel: string;
+  aiApiKey: string;
+  transcriptPostAction: TranscriptPostAction;
 }
+
+export type TranscriptPostAction = "transcript" | "summary" | "full";
 
 export const DEFAULT_SETTINGS: RMRSettings = {
   binPath: "",
@@ -42,6 +55,16 @@ export const DEFAULT_SETTINGS: RMRSettings = {
   enableGlobalHotkey: false,
   globalHotkeyAccelerator: "CommandOrControl+Shift+R",
   enableControlWindow: false,
+  transcribeOnStop: false,
+  whisperServerUrl: "http://127.0.0.1:5678",
+  whisperModel: "",
+  transcribeLanguage: "ja",
+  translateToEnglish: false,
+  summarizeOnTranscribe: false,
+  aiProvider: "anthropic",
+  aiModel: "",
+  aiApiKey: "",
+  transcriptPostAction: "full",
 };
 
 export class RMRSettingTab extends PluginSettingTab {
@@ -279,5 +302,123 @@ export class RMRSettingTab extends PluginSettingTab {
       "⚠ macOS ではグローバルホットキーに「アクセシビリティ」権限が必要です。" +
         "効かない場合は システム設定 > プライバシーとセキュリティ > アクセシビリティ で Obsidian を許可してください。"
     );
+
+    // --- 文字起こし（Phase 6・ローカル Whisper） ---
+    containerEl.createEl("h3", { text: "文字起こし（ローカル Whisper）" });
+
+    new Setting(containerEl)
+      .setName("停止時に自動で文字起こし")
+      .setDesc("録音停止後、m4a をローカル Whisper サーバへ送り、結果をノートに追記します。")
+      .addToggle((t) =>
+        t.setValue(this.plugin.settings.transcribeOnStop).onChange(async (v) => {
+          this.plugin.settings.transcribeOnStop = v;
+          await this.plugin.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Whisper サーバ URL")
+      .setDesc("既定 http://127.0.0.1:5678（ローカル MLX サーバ）。")
+      .addText((text) =>
+        text
+          .setPlaceholder("http://127.0.0.1:5678")
+          .setValue(this.plugin.settings.whisperServerUrl)
+          .onChange(async (v) => {
+            this.plugin.settings.whisperServerUrl = v.trim();
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("言語")
+      .setDesc("例: ja / en / auto。")
+      .addText((text) =>
+        text
+          .setPlaceholder("ja")
+          .setValue(this.plugin.settings.transcribeLanguage)
+          .onChange(async (v) => {
+            this.plugin.settings.transcribeLanguage = v.trim();
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Whisper モデル")
+      .setDesc("空欄はサーバのロード済みモデル。")
+      .addText((text) =>
+        text
+          .setPlaceholder("(サーバ既定)")
+          .setValue(this.plugin.settings.whisperModel)
+          .onChange(async (v) => {
+            this.plugin.settings.whisperModel = v.trim();
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("ノートへの出力")
+      .setDesc("全文のみ / 要約のみ / 両方。")
+      .addDropdown((d) =>
+        d
+          .addOption("transcript", "全文のみ")
+          .addOption("summary", "要約のみ")
+          .addOption("full", "全文＋要約")
+          .setValue(this.plugin.settings.transcriptPostAction)
+          .onChange(async (v) => {
+            this.plugin.settings.transcriptPostAction = v as TranscriptPostAction;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("AI 要約を生成")
+      .setDesc("文字起こし後に要約・アクションアイテムを抽出します（AI キーが必要）。")
+      .addToggle((t) =>
+        t.setValue(this.plugin.settings.summarizeOnTranscribe).onChange(async (v) => {
+          this.plugin.settings.summarizeOnTranscribe = v;
+          await this.plugin.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("AI プロバイダ")
+      .addDropdown((d) =>
+        d
+          .addOption("anthropic", "Anthropic（Claude）")
+          .addOption("openai", "OpenAI")
+          .addOption("ollama", "Ollama（ローカル）")
+          .setValue(this.plugin.settings.aiProvider)
+          .onChange(async (v) => {
+            this.plugin.settings.aiProvider = v;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("AI モデル")
+      .setDesc("空欄はプロバイダ既定（Anthropic は claude-sonnet-4）。")
+      .addText((text) =>
+        text
+          .setPlaceholder("(既定)")
+          .setValue(this.plugin.settings.aiModel)
+          .onChange(async (v) => {
+            this.plugin.settings.aiModel = v.trim();
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("AI API キー")
+      .setDesc("要約用。サーバ経由で AI プロバイダに渡されます（Vault の設定に保存されます）。")
+      .addText((text) => {
+        text
+          .setPlaceholder("sk-ant-...")
+          .setValue(this.plugin.settings.aiApiKey)
+          .onChange(async (v) => {
+            this.plugin.settings.aiApiKey = v.trim();
+            await this.plugin.saveSettings();
+          });
+        text.inputEl.type = "password";
+      });
   }
 }
