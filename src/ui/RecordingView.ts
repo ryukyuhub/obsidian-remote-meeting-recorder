@@ -1,9 +1,10 @@
-import { ItemView, Notice, WorkspaceLeaf, setIcon } from "obsidian";
+import { ItemView, Notice, TFile, WorkspaceLeaf, setIcon } from "obsidian";
 import type RemoteMeetingRecorderPlugin from "../main";
 import type { RecorderSource } from "../types";
 import type { MicDevice } from "../recorder/devices";
 import { WaveformRenderer } from "../audio/waveform";
 import { defaultFilename, formatElapsed } from "../util/time";
+import { pickMarkdownNote } from "./NotePicker";
 
 export const RECORDING_VIEW_TYPE = "rmr-recording-view";
 
@@ -22,6 +23,9 @@ export class RecordingView extends ItemView {
   private vMicDevice: string;
   private vMonitor: boolean;
   private consent = false;
+
+  // 埋め込み先ノート（未選択なら停止時に埋め込みしない）
+  private vEmbedFile: TFile | null = null;
 
   // マイクデバイス一覧（list-devices・onOpen で取得）
   private micDevices: MicDevice[] = [];
@@ -87,6 +91,17 @@ export class RecordingView extends ItemView {
     this.render();
   }
 
+  /** 外部（ファイル右クリック等）から埋め込み先ノートを設定して再描画。録音中は変更不可。 */
+  setEmbedTarget(file: TFile): void {
+    if (this.recording) {
+      new Notice("録音中は埋め込み先を変更できません。");
+      return;
+    }
+    this.vEmbedFile = file;
+    this.render();
+    new Notice(`「${file.basename}」に録音を埋め込みます。録音を開始してください。`);
+  }
+
   /** 外部から呼ばれる: 経過時間の更新（status bar と同期）。 */
   setElapsed(sec: number): void {
     if (this.timerEl) this.timerEl.setText(formatElapsed(sec));
@@ -147,6 +162,7 @@ export class RecordingView extends ItemView {
     const panel = root.createDiv({ cls: "rmr-panel" });
     this.buildSourceRow(panel, active != null);
     this.buildSaveRow(panel, active != null);
+    if (!active) this.buildEmbedRow(panel);
     this.buildInputRow(panel, active != null);
     this.buildMonitorRow(panel);
     this.buildStaticRow(panel, "Format", "M4A（固定）");
@@ -228,6 +244,45 @@ export class RecordingView extends ItemView {
     });
   }
 
+  /** 埋め込み先ノートの選択。停止時埋め込みが有効なときだけ表示。未選択なら埋め込みしない。 */
+  private buildEmbedRow(panel: HTMLElement): void {
+    if (!this.plugin.settings.insertEmbedOnStop) return;
+    const row = panel.createDiv({ cls: "rmr-row" });
+    row.createDiv({ cls: "rmr-row-label", text: "埋め込み先" });
+    const control = row.createDiv({ cls: "rmr-row-control rmr-embed-control" });
+
+    const pickBtn = control.createEl("button", { cls: "rmr-embed-pick" });
+    const clearBtn = control.createEl("button", { cls: "rmr-embed-clear", text: "×" });
+    clearBtn.setAttr("aria-label", "選択を解除");
+    const hint = control.createSpan({ cls: "rmr-hint" });
+
+    const sync = (): void => {
+      if (this.vEmbedFile) {
+        pickBtn.setText(this.vEmbedFile.basename);
+        clearBtn.style.removeProperty("display");
+        hint.setText("");
+      } else {
+        pickBtn.setText("ノートを選択…");
+        clearBtn.style.display = "none";
+        hint.setText("未選択のまま録音すると埋め込みしません");
+      }
+    };
+    sync();
+
+    pickBtn.addEventListener("click", () => void this.chooseEmbedNote(sync));
+    clearBtn.addEventListener("click", () => {
+      this.vEmbedFile = null;
+      sync();
+    });
+  }
+
+  /** 埋め込み先ノートをモーダルで選ばせる。選択後に UI を同期。 */
+  private async chooseEmbedNote(sync: () => void): Promise<void> {
+    const file = await pickMarkdownNote(this.app);
+    if (file) this.vEmbedFile = file;
+    sync();
+  }
+
   private buildInputRow(panel: HTMLElement, locked: boolean): void {
     const row = panel.createDiv({ cls: "rmr-row" });
     row.createDiv({ cls: "rmr-row-label", text: "Input" });
@@ -289,6 +344,7 @@ export class RecordingView extends ItemView {
         label: this.vTitle,
         micDevice: this.vMicDevice,
         monitor: this.vMonitor,
+        embedNotePath: this.vEmbedFile?.path,
       });
     } catch (e) {
       new Notice(`録音を開始できませんでした: ${(e as Error).message}`);

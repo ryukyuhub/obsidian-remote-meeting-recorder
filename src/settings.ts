@@ -21,15 +21,9 @@ export interface RMRSettings {
   inputDeviceUid: string;
   insertEmbedOnStop: boolean;
   linkToDailyNote: boolean;
-  enableGlobalHotkey: boolean;
-  globalHotkeyAccelerator: string;
   enableControlWindow: boolean;
   // 文字起こし（Phase 6・設計書 §15）
   transcribeOnStop: boolean;
-  /** whispercpp = 同梱バイナリ（サーバ不要・既定） / server = ローカル Whisper サーバ */
-  transcribeBackend: TranscribeBackend;
-  whisperServerUrl: string;
-  whisperModel: string;
   /** whisper.cpp バイナリの絶対パス（空なら自動検出） */
   whisperCppBinPath: string;
   /** whisper.cpp モデル（ggml .bin の絶対パス、または models/ 下の名前） */
@@ -38,28 +32,21 @@ export interface RMRSettings {
   translateToEnglish: boolean;
 }
 
-export type TranscribeBackend = "whispercpp" | "server";
-
 export const DEFAULT_SETTINGS: RMRSettings = {
   binPath: "",
   defaultSaveDir: "Recordings",
   saveInVault: true,
   stateDir: "",
   sampleRate: 48000,
-  channels: 2,
+  channels: 1,
   defaultAgc: true,
   defaultSource: "both",
   monitor: false,
   inputDeviceUid: "",
   insertEmbedOnStop: true,
   linkToDailyNote: false,
-  enableGlobalHotkey: false,
-  globalHotkeyAccelerator: "CommandOrControl+Shift+R",
   enableControlWindow: false,
   transcribeOnStop: false,
-  transcribeBackend: "whispercpp",
-  whisperServerUrl: "http://127.0.0.1:5678",
-  whisperModel: "",
   whisperCppBinPath: "",
   whisperCppModel: "",
   transcribeLanguage: "ja",
@@ -83,7 +70,10 @@ export class RMRSettingTab extends PluginSettingTab {
 
     const binSetting = new Setting(containerEl)
       .setName("バイナリパス")
-      .setDesc("空欄なら native/sysrec/sysrec → bin/sysrec → PATH の順に自動検出します。");
+      .setDesc(
+        "空欄でOK。録音・診断のたびに native/sysrec/sysrec → bin/sysrec → PATH の順で自動検出します。" +
+          "「検出」は今どこで見つかるかを確認するだけのボタンです（押さなくても録音できます／設定は保存されません）。"
+      );
     binSetting.addText((text) =>
       text
         .setPlaceholder("（自動検出）")
@@ -94,17 +84,20 @@ export class RMRSettingTab extends PluginSettingTab {
         })
     );
     binSetting.addButton((btn) =>
-      btn.setButtonText("検出").onClick(() => {
-        const found = binCandidates({
-          binPath: this.plugin.settings.binPath,
-          pluginDir: this.plugin.getPluginDir(),
-        }).find((c) => c.exists);
-        if (found) {
-          new Notice(`sysrec を検出: ${found.path}（${found.origin}）`);
-        } else {
-          new Notice("sysrec が見つかりません。「npm run build-sysrec」でビルドしてください。");
-        }
-      })
+      btn
+        .setButtonText("検出")
+        .setTooltip("今どこで見つかるかを確認します（設定は変更しません）")
+        .onClick(() => {
+          const found = binCandidates({
+            binPath: this.plugin.settings.binPath,
+            pluginDir: this.plugin.getPluginDir(),
+          }).find((c) => c.exists);
+          if (found) {
+            new Notice(`sysrec を検出: ${found.path}（${found.origin}）`);
+          } else {
+            new Notice("sysrec が見つかりません。「npm run build-sysrec」でビルドしてください。");
+          }
+        })
     );
 
     new Setting(containerEl)
@@ -144,8 +137,12 @@ export class RMRSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("状態ディレクトリ")
-      .setDesc("セッション情報の保存先。空欄なら ~/.meeting-recorder。")
+      .setName("状態ディレクトリ（作業フォルダ）")
+      .setDesc(
+        "録音中の音声と進行状況を Vault の外に一時保存する場所。" +
+          "Obsidian が落ちたり再読み込みしても、ここを見て録音を復元・保存します。" +
+          "ふつうは空欄（~/.meeting-recorder）のままでOK。"
+      )
       .addText((text) =>
         text
           .setPlaceholder("~/.meeting-recorder")
@@ -175,8 +172,12 @@ export class RMRSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Auto gain control（AGC）")
-      .setDesc("既定オン（-16 dBFS 正規化 + -1 dBFS リミッター）。")
+      .setName("音量の自動調整（AGC）")
+      .setDesc(
+        "録音の音量を自動でそろえます。小さい声は持ち上げ、大きすぎる音は歪まないよう抑えるので、" +
+          "聞き取り・文字起こしが安定します。オフにすると録れたままの生の音量になります。" +
+          "（-16 dBFS へ正規化 + -1 dBFS リミッター）"
+      )
       .addToggle((t) =>
         t.setValue(this.plugin.settings.defaultAgc).onChange(async (v) => {
           this.plugin.settings.defaultAgc = v;
@@ -202,8 +203,12 @@ export class RMRSettingTab extends PluginSettingTab {
     });
 
     new Setting(containerEl)
-      .setName("モニター（入力の試聴）")
-      .setDesc("録音ビューの初期値。マイク入力を出力へ流します（ヘッドホン推奨・ハウリング注意）。")
+      .setName("モニター（自分のマイクを試聴）")
+      .setDesc(
+        "オンにすると、録音中に自分のマイク音声をリアルタイムで再生し、ちゃんと録れているか耳で確認できます。" +
+          "必ずヘッドホンを使ってください（スピーカーだとマイクが自分の音を拾ってハウリングします）。" +
+          "ここは録音ビューの初期値で、録音ごとに切り替えられます。"
+      )
       .addToggle((t) =>
         t.setValue(this.plugin.settings.monitor).onChange(async (v) => {
           this.plugin.settings.monitor = v;
@@ -213,34 +218,48 @@ export class RMRSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("サンプルレート")
-      .addText((text) =>
-        text.setValue(String(this.plugin.settings.sampleRate)).onChange(async (v) => {
-          const n = parseInt(v, 10);
-          if (Number.isFinite(n) && n > 0) {
-            this.plugin.settings.sampleRate = n;
+      .setDesc(
+        "録音の音質。48000 Hz が高音質（既定・推奨）。数字を下げるとファイルは小さくなりますが音は粗くなります。" +
+          "文字起こし用の 16kHz 変換は別途自動で行うので、通常は 48000 のままでOK。"
+      )
+      .addDropdown((dd) =>
+        dd
+          .addOption("48000", "48000 Hz（高音質・推奨）")
+          .addOption("24000", "24000 Hz")
+          .addOption("16000", "16000 Hz（文字起こし相当・小容量）")
+          .setValue(String(this.plugin.settings.sampleRate))
+          .onChange(async (v) => {
+            this.plugin.settings.sampleRate = parseInt(v, 10);
             await this.plugin.saveSettings();
-          }
-        })
+          })
       );
 
     new Setting(containerEl)
       .setName("チャンネル数")
-      .addText((text) =>
-        text.setValue(String(this.plugin.settings.channels)).onChange(async (v) => {
-          const n = parseInt(v, 10);
-          if (Number.isFinite(n) && n > 0) {
-            this.plugin.settings.channels = n;
+      .setDesc(
+        "モノラル（推奨）は相手＋自分を 1 本にまとめ、ファイルが約半分になります。会議は左右が同じ音になりがちなので通常はモノラルで十分です。" +
+          "ステレオは 2 チャンネルで保存します（会議相手がモノラル配信だと左右ほぼ同じ内容になります）。"
+      )
+      .addDropdown((dd) =>
+        dd
+          .addOption("1", "モノラル（推奨）")
+          .addOption("2", "ステレオ")
+          .setValue(this.plugin.settings.channels === 1 ? "1" : "2")
+          .onChange(async (v) => {
+            this.plugin.settings.channels = parseInt(v, 10);
             await this.plugin.saveSettings();
-          }
-        })
+          })
       );
 
     // --- 停止時の動作 ---
     containerEl.createEl("h3", { text: "停止時" });
 
     new Setting(containerEl)
-      .setName("停止時に埋め込みを挿入")
-      .setDesc("Vault 内保存なら録音開始時のノートに ![[…]] を挿入します。")
+      .setName("停止時にノートに埋め込み")
+      .setDesc(
+        "オンにすると、録音停止時に録音ファイルを ![[…]] でノートに埋め込みます。" +
+          "埋め込み先（アクティブノート／指定ノート）は録音開始画面で選べます。Vault 内保存が必要です。"
+      )
       .addToggle((t) =>
         t.setValue(this.plugin.settings.insertEmbedOnStop).onChange(async (v) => {
           this.plugin.settings.insertEmbedOnStop = v;
@@ -271,39 +290,8 @@ export class RMRSettingTab extends PluginSettingTab {
         })
       );
 
-    new Setting(containerEl)
-      .setName("グローバルホットキー")
-      .setDesc("Obsidian が非フォーカスでも効くホットキー。録音中は停止、停止中は録音ビューを開きます。")
-      .addToggle((t) =>
-        t.setValue(this.plugin.settings.enableGlobalHotkey).onChange(async (v) => {
-          this.plugin.settings.enableGlobalHotkey = v;
-          await this.plugin.saveSettings();
-          this.plugin.registerHotkeys();
-        })
-      );
-
-    new Setting(containerEl)
-      .setName("ホットキーの割り当て")
-      .setDesc("Electron 形式（例: CommandOrControl+Shift+R）。")
-      .addText((text) =>
-        text
-          .setPlaceholder("CommandOrControl+Shift+R")
-          .setValue(this.plugin.settings.globalHotkeyAccelerator)
-          .onChange(async (v) => {
-            this.plugin.settings.globalHotkeyAccelerator = v.trim();
-            await this.plugin.saveSettings();
-            this.plugin.registerHotkeys();
-          })
-      );
-
-    const note = containerEl.createEl("p", { cls: "rmr-settings-note" });
-    note.setText(
-      "⚠ macOS ではグローバルホットキーに「アクセシビリティ」権限が必要です。" +
-        "効かない場合は システム設定 > プライバシーとセキュリティ > アクセシビリティ で Obsidian を許可してください。"
-    );
-
-    // --- 文字起こし（Phase 6・ローカル Whisper） ---
-    containerEl.createEl("h3", { text: "文字起こし（ローカル Whisper）" });
+    // --- 文字起こし（Phase 6・whisper.cpp 同梱） ---
+    containerEl.createEl("h3", { text: "文字起こし（whisper.cpp・同梱）" });
 
     new Setting(containerEl)
       .setName("停止時に自動で文字起こし")
@@ -315,61 +303,10 @@ export class RMRSettingTab extends PluginSettingTab {
         })
       );
 
-    new Setting(containerEl)
-      .setName("エンジン")
-      .setDesc("whisper.cpp（同梱・サーバ不要・推奨）/ ローカル Whisper サーバ。")
-      .addDropdown((d) =>
-        d
-          .addOption("whispercpp", "whisper.cpp（同梱）")
-          .addOption("server", "Whisper サーバ")
-          .setValue(this.plugin.settings.transcribeBackend)
-          .onChange(async (v) => {
-            this.plugin.settings.transcribeBackend = v as TranscribeBackend;
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(containerEl)
-      .setName("whisper.cpp モデル")
-      .setDesc(
-        "ggml モデルの絶対パス、または models/ 下の名前（例: ggml-large-v3-turbo）。" +
-          "診断（doctor）からダウンロードできます。"
-      )
-      .addText((text) =>
-        text
-          .setPlaceholder("ggml-large-v3-turbo")
-          .setValue(this.plugin.settings.whisperCppModel)
-          .onChange(async (v) => {
-            this.plugin.settings.whisperCppModel = v.trim();
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(containerEl)
-      .setName("whisper.cpp バイナリパス")
-      .setDesc("空欄なら native/whisper/ → PATH の whisper-cli を自動検出。")
-      .addText((text) =>
-        text
-          .setPlaceholder("（自動検出）")
-          .setValue(this.plugin.settings.whisperCppBinPath)
-          .onChange(async (v) => {
-            this.plugin.settings.whisperCppBinPath = v.trim();
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(containerEl)
-      .setName("Whisper サーバ URL")
-      .setDesc("エンジン=サーバ のとき使用。既定 http://127.0.0.1:5678（ローカル MLX）。")
-      .addText((text) =>
-        text
-          .setPlaceholder("http://127.0.0.1:5678")
-          .setValue(this.plugin.settings.whisperServerUrl)
-          .onChange(async (v) => {
-            this.plugin.settings.whisperServerUrl = v.trim();
-            await this.plugin.saveSettings();
-          })
-      );
+    const whisperNote = containerEl.createEl("p", { cls: "rmr-settings-note" });
+    whisperNote.setText(
+      "モデルと whisper.cpp バイナリは自動検出されます。モデルの入手・状態確認は「診断（doctor）」から行えます。"
+    );
 
     new Setting(containerEl)
       .setName("言語")
@@ -383,19 +320,5 @@ export class RMRSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           })
       );
-
-    new Setting(containerEl)
-      .setName("Whisper モデル")
-      .setDesc("空欄はサーバのロード済みモデル。")
-      .addText((text) =>
-        text
-          .setPlaceholder("(サーバ既定)")
-          .setValue(this.plugin.settings.whisperModel)
-          .onChange(async (v) => {
-            this.plugin.settings.whisperModel = v.trim();
-            await this.plugin.saveSettings();
-          })
-      );
-
   }
 }

@@ -27,18 +27,7 @@ export async function decodeToPcm16k(bytes: ArrayBuffer): Promise<Float32Array> 
   return rendered.getChannelData(0).slice();
 }
 
-/** Float32Array を base64 に（生 float32 バイト列）。 */
-export function f32ToB64(f32: Float32Array): string {
-  const bytes = new Uint8Array(f32.buffer, f32.byteOffset, f32.byteLength);
-  const chunks: string[] = [];
-  const block = 8192; // 大きいスプレッドでのスタック超過を避ける（参考実装準拠）
-  for (let i = 0; i < bytes.byteLength; i += block) {
-    chunks.push(String.fromCharCode(...bytes.subarray(i, Math.min(i + block, bytes.byteLength))));
-  }
-  return btoa(chunks.join(""));
-}
-
-/** 16kHz mono Float32 → 16bit PCM WAV バイト列（サーバが WAV を要求する場合用）。 */
+/** 16kHz mono Float32 → 16bit PCM WAV バイト列（whisper-cli に渡す入力）。 */
 export function pcmToWav(f32: Float32Array, sampleRate = 16000): ArrayBuffer {
   const numSamples = f32.length;
   const buffer = new ArrayBuffer(44 + numSamples * 2);

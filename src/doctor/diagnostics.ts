@@ -238,13 +238,9 @@ export function runDoctor(ctx: RecorderContext): DoctorCheck[] {
   return checks;
 }
 
-/** 文字起こしバックエンドに応じたチェック（whisper.cpp バイナリ/モデル or サーバ疎通）。 */
+/** 文字起こし（同梱 whisper.cpp）のバイナリ/モデルをチェック。 */
 function transcribeChecks(ctx: RecorderContext): DoctorCheck[] {
   const s = ctx.settings;
-  if (s.transcribeBackend === "server") {
-    return [whisperServerCheck(s.whisperServerUrl || "http://127.0.0.1:5678")];
-  }
-
   const out: DoctorCheck[] = [];
   const bin = resolveWhisperBin(ctx.pluginDir, s.whisperCppBinPath);
   out.push({
@@ -281,35 +277,6 @@ function transcribeChecks(ctx: RecorderContext): DoctorCheck[] {
         },
   });
   return out;
-}
-
-/** Whisper サーバの /health を curl で叩いて疎通確認（文字起こしは任意なので未接続は warn）。 */
-function whisperServerCheck(baseUrl: string): DoctorCheck {
-  const healthUrl = baseUrl.replace(/\/+$/, "") + "/health";
-  const r = tryExecSync("curl", ["-s", "-m", "3", healthUrl]);
-  if (r.ok && r.stdout.trim()) {
-    try {
-      const j = JSON.parse(r.stdout) as { status?: string; model?: string; device?: string };
-      if (j && j.status) {
-        return {
-          id: "whisper",
-          label: "Whisper サーバ（文字起こし）",
-          status: "ok",
-          detail: `${baseUrl}\nmodel: ${j.model ?? "?"} / device: ${j.device ?? "?"}`,
-        };
-      }
-    } catch {
-      // JSON でない
-    }
-  }
-  return {
-    id: "whisper",
-    label: "Whisper サーバ（文字起こし）",
-    status: "warn",
-    detail:
-      `未接続: ${baseUrl}\n` +
-      "文字起こしを使う場合はローカル Whisper サーバ（MLX）を起動してください。",
-  };
 }
 
 function stateAndTccChecks(ctx: RecorderContext, binPath: string | null): DoctorCheck[] {

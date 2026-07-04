@@ -9,8 +9,9 @@
 //                 [--samplerate 48000] [--channels 2] [--agc on|off]
 //                 [--status-file <path>] [--pidfile <path>]
 //   ミックス: sysrec mix --in <a.m4a> --in <b.m4a> --out <out.m4a>
-//             [--agc on|off] [--normalize on|off]
-//             （both の 2 ファイルを 1 本へ。ffmpeg 非依存の AVFoundation 実装）
+//             [--agc on|off] [--normalize on|off] [--channels 1|2]
+//             （both の 2 ファイルを 1 本へ。ffmpeg 非依存の AVFoundation 実装。
+//               --channels 1 で L/R 平均のモノラル出力）
 //
 // レベル処理:
 //   録音時   … ソース別 AGC（自動レベル調整・目標 -20 dBFS）+ 簡易リミッター（--agc off で無効）
@@ -491,6 +492,7 @@ func runMix(_ argv: [String]) -> Never {
     var out = ""
     var agcOn = true        // トラック別の自動レベル調整
     var normalizeOn = true  // 最終ラウドネス正規化（リミッターは常時有効）
+    var outChannels = 2     // 出力チャンネル数（1=モノラル / 2=ステレオ。既定は 2）
     var i = 0
     while i < argv.count {
         switch argv[i] {
@@ -498,6 +500,7 @@ func runMix(_ argv: [String]) -> Never {
         case "--out": i += 1; if i < argv.count { out = argv[i] }
         case "--agc": i += 1; if i < argv.count { agcOn = (argv[i] != "off") }
         case "--normalize": i += 1; if i < argv.count { normalizeOn = (argv[i] != "off") }
+        case "--channels": i += 1; if i < argv.count { outChannels = (Int(argv[i]) == 1) ? 1 : 2 }
         default: break
         }
         i += 1
@@ -604,17 +607,36 @@ func runMix(_ argv: [String]) -> Never {
     // 4) ルックアヘッドリミッター（シーリング -1 dBFS）— 常時有効の最終安全弁。
     applyLookaheadLimiter(mixed, ceiling: 0.891, sampleRate: target.sampleRate)
 
+    // 5) 出力チャンネル数。内部処理は常に 2ch で行い、モノラル指定なら最後に
+    //    L/R を平均して 1ch へダウンミックスする（会議は L≒R になりがちで、
+    //    2ch はファイルを倍にするだけのため。加算でなく平均でマイクの二重加算を防ぐ）。
+    let writeBuf: AVAudioPCMBuffer
+    if outChannels == 1 {
+        guard let monoFmt = AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 1),
+              let mono = AVAudioPCMBuffer(pcmFormat: monoFmt, frameCapacity: n) else {
+            die(1, "mix: モノラル出力バッファ確保に失敗。")
+        }
+        mono.frameLength = n
+        let dst = mono.floatChannelData![0]
+        let l = mixed.floatChannelData![0]
+        let r = mixed.floatChannelData![1]
+        for i in 0..<Int(n) { dst[i] = (l[i] + r[i]) * 0.5 }
+        writeBuf = mono
+    } else {
+        writeBuf = mixed
+    }
+
     let outURL = URL(fileURLWithPath: out)
     try? FileManager.default.removeItem(at: outURL)
     let outSettings: [String: Any] = [
         AVFormatIDKey: kAudioFormatMPEG4AAC,
         AVSampleRateKey: 48000,
-        AVNumberOfChannelsKey: 2,
+        AVNumberOfChannelsKey: outChannels,
         AVEncoderBitRateKey: 192000,
     ]
     do {
         let outFile = try AVAudioFile(forWriting: outURL, settings: outSettings)
-        try outFile.write(from: mixed)
+        try outFile.write(from: writeBuf)
     } catch { die(4, "mix: 書き出し失敗: \(error)") }
 
     let outAttrs = try? FileManager.default.attributesOfItem(atPath: out)

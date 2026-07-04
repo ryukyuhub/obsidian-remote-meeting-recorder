@@ -16,9 +16,7 @@ import { listMicDevices, type MicDevice } from "./recorder/devices";
 import { linkToDailyNote } from "./ui/dailyNote";
 import { rotateLogs } from "./state/sessionStore";
 import { WebAudioTap } from "./audio/webAudioTap";
-import { GlobalHotkeys } from "./platform/hotkeys";
 import { ControlWindowManager } from "./ui/controlWindow";
-import { getElectronRemote } from "./platform/electron";
 import { runTranscription } from "./transcribe/runTranscription";
 import { TranscribePicker } from "./ui/TranscribePicker";
 
@@ -39,6 +37,8 @@ export interface StartFromViewInput {
   label?: string;
   micDevice?: string;
   monitor?: boolean;
+  /** 埋め込み先ノートのパス（未指定なら停止時に埋め込みしない） */
+  embedNotePath?: string;
 }
 
 export default class RemoteMeetingRecorderPlugin extends Plugin {
@@ -56,7 +56,6 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
 
   // マイクの表示専用タップ（録音ビュー・ミニ窓の両方が参照する一元所有・§3.4）
   private micTap: WebAudioTap | null = null;
-  private hotkeys = new GlobalHotkeys();
   private controlWindow: ControlWindowManager | null = null;
 
   async onload(): Promise<void> {
@@ -102,8 +101,18 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
       callback: () => new DoctorModal(this.app, this).open(),
     });
 
-    // グローバルホットキー（設定で有効時のみ）
-    this.registerHotkeys();
+    // ノート（.md）右クリック → 「ここに会議録音を埋め込む」
+    this.registerEvent(
+      this.app.workspace.on("file-menu", (menu, file) => {
+        if (!(file instanceof TFile) || file.extension !== "md") return;
+        menu.addItem((item) =>
+          item
+            .setTitle("ここに会議録音を埋め込む")
+            .setIcon("circle-dot")
+            .onClick(() => void this.startRecordingHere(file))
+        );
+      })
+    );
 
     // 起動時: 孤児掃除 → セッション復元（設計書 §7）
     this.app.workspace.onLayoutReady(() => this.restoreSessions());
@@ -115,8 +124,7 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
     // 録音は殺さない。watcher の interval を止めるだけ（設計書 §6-7）。
     for (const w of this.watchers.values()) w.stop();
     this.watchers.clear();
-    // ホットキーとミニ窓は残すとゾンビ化するので確実に破棄（表示専用・録音には非影響）
-    this.hotkeys.unregisterAll();
+    // ミニ窓は残すとゾンビ化するので確実に破棄（表示専用・録音には非影響）
     this.controlWindow?.destroy();
     this.controlWindow = null;
     this.stopMicTap();
@@ -168,6 +176,17 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
     this.app.workspace.revealLeaf(leaf);
   }
 
+  /** ノート右クリック「ここに会議録音を埋め込む」から: 録音ビューを開き、そのノートを埋め込み先にする。 */
+  async startRecordingHere(file: TFile): Promise<void> {
+    // 明示的な「ここに録音」なので停止時埋め込みを有効化しておく（未選択扱いを避ける）
+    if (!this.settings.insertEmbedOnStop) {
+      this.settings.insertEmbedOnStop = true;
+      await this.saveSettings();
+    }
+    await this.openRecordingView();
+    this.recordingView?.setEmbedTarget(file);
+  }
+
   // ================================================================
   // 開始・停止（オーケストレーション）
   // ================================================================
@@ -183,8 +202,13 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
       micDevice: input.micDevice || this.settings.inputDeviceUid || undefined,
     };
 
-    // 埋め込み先ノートを開始時にキャプチャ（設計書 §9.4）
-    const startFile = this.app.workspace.getActiveViewOfType(MarkdownView)?.file ?? null;
+    // 埋め込み先ノートを開始時にキャプチャ（設計書 §9.4）。
+    // 明示的に選択されたノートのみ対象。未選択（解決失敗も含む）なら null＝停止時に埋め込みしない。
+    let startFile: TFile | null = null;
+    if (input.embedNotePath) {
+      const f = this.app.vault.getAbstractFileByPath(input.embedNotePath);
+      if (f instanceof TFile) startFile = f;
+    }
 
     let result;
     try {
@@ -345,7 +369,8 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
     const target = this.embedTargets.get(sessionId) ?? null;
     this.embedTargets.delete(sessionId);
     if (!ev.path || !this.settings.saveInVault) return;
-    if (this.settings.insertEmbedOnStop) {
+    // 埋め込み先が明示的に選択されているときだけ埋め込む（未選択なら何もしない）
+    if (this.settings.insertEmbedOnStop && target) {
       await insertEmbed(this.app, target, ev.path);
     }
     if (this.settings.linkToDailyNote) {
@@ -409,50 +434,6 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
   // ================================================================
   // グローバルホットキー（§9.4・§14.3）
   // ================================================================
-  /** 設定に応じてグローバルホットキーを（再）登録。設定変更時にも呼ぶ。 */
-  registerHotkeys(): void {
-    this.hotkeys.unregisterAll();
-    if (!this.settings.enableGlobalHotkey) return;
-    const acc = this.settings.globalHotkeyAccelerator?.trim();
-    if (!acc) return;
-    if (!this.hotkeys.available()) {
-      new Notice("グローバルホットキーはこの環境で利用できません。");
-      return;
-    }
-    const ok = this.hotkeys.register(acc, () => this.onHotkeyToggle());
-    if (!ok) {
-      new Notice(
-        `グローバルホットキー「${acc}」を登録できませんでした。` +
-          `他アプリと競合、または macOS のアクセシビリティ権限が必要です。`,
-        10000
-      );
-    }
-  }
-
-  private onHotkeyToggle(): void {
-    if (this.activeRecording) {
-      void this.stopActiveRecording();
-      new Notice("録音を停止しました（ホットキー）");
-    } else {
-      // 同意契約を守るため自動開始はせず、ビューを前面に出す
-      this.focusApp();
-      void this.openRecordingView();
-      new Notice("録音ビューを開きました（同意を確認して録音してください）");
-    }
-  }
-
-  private focusApp(): void {
-    try {
-      const remote = getElectronRemote();
-      const win = (remote as { getCurrentWindow?: () => { show?: () => void; focus?: () => void } })
-        ?.getCurrentWindow?.();
-      win?.show?.();
-      win?.focus?.();
-    } catch {
-      /* noop */
-    }
-  }
-
   // ================================================================
   // remix 復旧
   // ================================================================

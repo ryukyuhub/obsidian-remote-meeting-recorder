@@ -9,7 +9,7 @@ function nodeRequire(): ((id: string) => AnyRecord) | null {
 }
 
 /**
- * globalShortcut / BrowserWindow など main プロセス側モジュールを提供するオブジェクト。
+ * BrowserWindow / dialog など main プロセス側モジュールを提供するオブジェクト。
  * 1) Obsidian が有効化している electron.remote → 2) @electron/remote パッケージ。
  */
 export function getElectronRemote(): AnyRecord | null {

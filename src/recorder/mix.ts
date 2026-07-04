@@ -11,7 +11,7 @@ import { existsWithSize, intermediatePaths, statBytes } from "../util/fsx";
  * `mixed` イベントは status-file に出ない癖があるため、イベントはパースしない（設計書 §4.3）。
  */
 export function runMix(
-  _ctx: RecorderContext,
+  ctx: RecorderContext,
   bin: string,
   sys: string,
   mic: string,
@@ -19,7 +19,23 @@ export function runMix(
   agc: "on" | "off"
 ): Promise<boolean> {
   return new Promise((resolve) => {
-    const args = ["-i", bin, "mix", "--in", sys, "--in", mic, "--out", out, "--agc", agc];
+    // 出力チャンネル数（1=モノラル / 2=ステレオ）。会議は L≒R になりがちなので既定はモノラル寄り。
+    const channels = ctx.settings.channels === 1 ? "1" : "2";
+    const args = [
+      "-i",
+      bin,
+      "mix",
+      "--in",
+      sys,
+      "--in",
+      mic,
+      "--out",
+      out,
+      "--agc",
+      agc,
+      "--channels",
+      channels,
+    ];
     let child;
     try {
       child = spawn("caffeinate", args, { stdio: "ignore" });

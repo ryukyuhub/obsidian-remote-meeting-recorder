@@ -1,7 +1,7 @@
 #!/bin/sh
 # sysrec 契約再現スタブ（実録音なし・E2E 用）。
 #   録音: --out <p> --source <both|system|mic> --pidfile <p> --status-file <p> [他は無視]
-#   ミックス: mix --in <sys> --in <mic> --out <final> [--agc ...]
+#   ミックス: mix --in <sys> --in <mic> --out <final> [--agc ...] [--channels 1|2]
 # 環境変数: FAKE_NO_PIDFILE=1（pidfile を書かない=起動失敗）/ FAKE_MIX_FAIL=1（mix を失敗）
 
 emit() { # $1=status-file $2=json行
@@ -16,7 +16,7 @@ if [ "$1" = "mix" ]; then
   while [ $# -gt 0 ]; do
     case "$1" in
       --out) OUT="$2"; shift 2 ;;
-      --in|--agc|--normalize) shift 2 ;;
+      --in|--agc|--normalize|--channels) shift 2 ;;
       *) shift ;;
     esac
   done

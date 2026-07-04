@@ -119,6 +119,19 @@
   color: var(--text-muted);
   font-size: 0.9em;
 }
+/* 埋め込み先の行: 狭いサイドバーでボタン・注記が折り返せるように */
+.rmr-embed-control {
+  flex-wrap: wrap;
+}
+.rmr-embed-pick {
+  flex-shrink: 0;
+  cursor: pointer;
+}
+.rmr-embed-clear {
+  flex-shrink: 0;
+  cursor: pointer;
+  padding: 0 8px;
+}
 .rmr-consent {
   display: flex;
   align-items: center;

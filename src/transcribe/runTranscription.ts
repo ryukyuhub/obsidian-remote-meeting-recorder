@@ -3,8 +3,7 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import type RemoteMeetingRecorderPlugin from "../main";
-import { decodeToPcm16k, f32ToB64, pcmToWav } from "./pcm";
-import { WhisperClient } from "./whisperClient";
+import { decodeToPcm16k, pcmToWav } from "./pcm";
 import { transcribeWav } from "./whisperCppClient";
 import { resolveWhisperBin, resolveWhisperModel } from "./resolveWhisper";
 import { computeVaultRelative } from "../ui/embed";
@@ -16,8 +15,8 @@ function readArrayBuffer(p: string): ArrayBuffer {
 
 /**
  * 録音後 一括文字起こし（設計書 §15.2 ①・sysrec 無改修）。
- * バックエンド: whisper.cpp 同梱バイナリ（既定・サーバ不要）or ローカル Whisper サーバ。
- * m4a → 16kHz mono PCM → 文字起こし →（任意で AI 要約）→ ノート追記。
+ * バックエンドは同梱の whisper.cpp（サーバ不要・オフライン）。
+ * m4a → 16kHz mono PCM → WAV → whisper-cli → ノート追記。
  */
 export async function runTranscription(
   plugin: RemoteMeetingRecorderPlugin,
@@ -27,10 +26,7 @@ export async function runTranscription(
   const s = plugin.settings;
   const notice = new Notice("文字起こし中…", 0);
   try {
-    const text =
-      s.transcribeBackend === "server"
-        ? await transcribeViaServer(plugin, audioPath)
-        : await transcribeViaWhisperCpp(plugin, audioPath);
+    const text = await transcribeViaWhisperCpp(plugin, audioPath);
 
     if (text == null) {
       notice.hide();
@@ -89,30 +85,6 @@ async function transcribeViaWhisperCpp(
       // 無視
     }
   }
-}
-
-/** ローカル Whisper サーバで文字起こし。失敗時は Notice して null。 */
-async function transcribeViaServer(
-  plugin: RemoteMeetingRecorderPlugin,
-  audioPath: string
-): Promise<string | null> {
-  const s = plugin.settings;
-  const client = new WhisperClient(s.whisperServerUrl);
-  const health = await client.health();
-  if (!health) {
-    new Notice(
-      `Whisper サーバに接続できません（${s.whisperServerUrl}）。起動と設定を確認してください。`,
-      10000
-    );
-    return null;
-  }
-  const pcm = await decodeToPcm16k(readArrayBuffer(audioPath));
-  const b64 = f32ToB64(pcm);
-  const tr = await client.transcribe(b64, {
-    language: s.transcribeLanguage || "auto",
-    model: s.whisperModel || undefined,
-  });
-  return tr.text || "";
 }
 
 function buildMarkdown(text: string, lang?: string): string {
