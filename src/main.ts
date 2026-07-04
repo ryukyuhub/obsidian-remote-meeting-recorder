@@ -11,7 +11,10 @@ import { stopRecording } from "./recorder/stop";
 import { remix } from "./recorder/mix";
 import { restoreInProgressSessions } from "./recorder/restore";
 import { SessionWatcher } from "./recorder/watch";
-import { insertEmbed } from "./ui/embed";
+import { insertEmbed, computeVaultRelative } from "./ui/embed";
+import { listMicDevices, type MicDevice } from "./recorder/devices";
+import { linkToDailyNote } from "./ui/dailyNote";
+import { rotateLogs } from "./state/sessionStore";
 
 /** ビューが操作する前面録音の情報（primary）。 */
 export interface ActiveRecordingInfo {
@@ -28,6 +31,7 @@ export interface StartFromViewInput {
   filename: string;
   agc: boolean;
   label?: string;
+  micDevice?: string;
 }
 
 export default class RemoteMeetingRecorderPlugin extends Plugin {
@@ -41,6 +45,7 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
   private handledTerminals = new Set<string>();
   private recordingView: RecordingView | null = null;
   private lastWarningSessionId: string | null = null;
+  private finalizedCallbacks: Array<(ev: TerminalEvent) => void> = [];
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -150,7 +155,7 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
       filename: input.filename,
       agc: input.agc,
       label: input.label,
-      micDevice: this.settings.inputDeviceUid || undefined,
+      micDevice: input.micDevice || this.settings.inputDeviceUid || undefined,
     };
 
     // 埋め込み先ノートを開始時にキャプチャ（設計書 §9.4）
@@ -241,6 +246,7 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
           `録音を保存しました${ev.durationSec ? `（${ev.durationSec}秒）` : ""}`
         );
         void this.maybeInsertEmbed(ev, sessionId);
+        this.emitFinalized(ev); // 文字起こし等のフック点（設計書 §13・Phase 6）
         break;
       case "stop-warning":
         this.lastWarningSessionId = sessionId;
@@ -270,9 +276,40 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
   private async maybeInsertEmbed(ev: TerminalEvent, sessionId: string): Promise<void> {
     const target = this.embedTargets.get(sessionId) ?? null;
     this.embedTargets.delete(sessionId);
-    if (!ev.path) return;
-    if (!this.settings.saveInVault || !this.settings.insertEmbedOnStop) return;
-    await insertEmbed(this.app, target, ev.path);
+    if (!ev.path || !this.settings.saveInVault) return;
+    if (this.settings.insertEmbedOnStop) {
+      await insertEmbed(this.app, target, ev.path);
+    }
+    if (this.settings.linkToDailyNote) {
+      const rel = computeVaultRelative(this.app, ev.path);
+      if (rel) await linkToDailyNote(this.app, rel);
+    }
+  }
+
+  // ================================================================
+  // 文字起こし等のフック点 / デバイス列挙
+  // ================================================================
+  /** 録音が最終化（stopped/remixed）したら呼ばれるコールバックを登録。unregister を返す。 */
+  onRecordingFinalized(cb: (ev: TerminalEvent) => void): () => void {
+    this.finalizedCallbacks.push(cb);
+    return () => {
+      this.finalizedCallbacks = this.finalizedCallbacks.filter((c) => c !== cb);
+    };
+  }
+
+  private emitFinalized(ev: TerminalEvent): void {
+    for (const cb of this.finalizedCallbacks) {
+      try {
+        cb(ev);
+      } catch (e) {
+        console.error("[remote-meeting-recorder] onRecordingFinalized コールバック失敗", e);
+      }
+    }
+  }
+
+  /** マイク入力デバイス一覧（sysrec list-devices）。 */
+  async listMicDevices(): Promise<MicDevice[]> {
+    return listMicDevices(this.buildContext().resolveBinPath());
   }
 
   // ================================================================
@@ -298,6 +335,7 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
   // ================================================================
   private restoreSessions(): void {
     const ctx = this.buildContext();
+    rotateLogs(ctx.paths); // 30 日より古い退避ログを掃除（設計書 §6-6）
     let result;
     try {
       result = restoreInProgressSessions(ctx);

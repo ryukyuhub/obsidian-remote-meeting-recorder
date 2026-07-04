@@ -203,6 +203,26 @@ export function runDoctor(ctx: RecorderContext): DoctorCheck[] {
       : undefined,
   });
 
+  // 6.5 入力（マイク）デバイス一覧
+  const dev = tryExecSync(binPath, ["list-devices"]);
+  let deviceStatus: DoctorStatus = "warn";
+  let deviceDetail = "一覧を取得できませんでした（古いバイナリの可能性）";
+  if (dev.ok) {
+    try {
+      const arr = JSON.parse(dev.stdout) as Array<{ name?: string }>;
+      if (Array.isArray(arr)) {
+        deviceStatus = arr.length > 0 ? "ok" : "warn";
+        deviceDetail =
+          arr.length > 0
+            ? arr.map((d) => d.name ?? "?").join(" / ")
+            : "マイクが見つかりません";
+      }
+    } catch {
+      // JSON でない = 古いバイナリ
+    }
+  }
+  checks.push({ id: "devices", label: "入力デバイス", status: deviceStatus, detail: deviceDetail });
+
   // 7. 状態ディレクトリ / 8. TCC（実バイナリで権限プリフライト）
   checks.push(...stateAndTccChecks(ctx, binPath));
 

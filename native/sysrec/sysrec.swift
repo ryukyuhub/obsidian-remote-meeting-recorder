@@ -645,6 +645,24 @@ struct SysRec {
             exit(CGPreflightScreenCaptureAccess() ? 0 : 2)
         }
 
+        // 入力（マイク）デバイス一覧を JSON で出力（[{uid,name}]・doctor/UI 用）。
+        // uid は microphoneCaptureDeviceID にそのまま渡せる AVCaptureDevice.uniqueID。
+        if argv.first == "list-devices" {
+            let discovery = AVCaptureDevice.DiscoverySession(
+                deviceTypes: [.microphone, .external],
+                mediaType: .audio, position: .unspecified)
+            let arr: [[String: String]] = discovery.devices.map {
+                ["uid": $0.uniqueID, "name": $0.localizedName]
+            }
+            if let data = try? JSONSerialization.data(withJSONObject: arr, options: [.sortedKeys]),
+               let s = String(data: data, encoding: .utf8) {
+                print(s)
+            } else {
+                print("[]")
+            }
+            exit(0)
+        }
+
         // mix サブコマンド
         if argv.first == "mix" { runMix(Array(argv.dropFirst())) }
 

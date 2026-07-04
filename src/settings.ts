@@ -20,6 +20,7 @@ export interface RMRSettings {
   monitor: boolean;
   inputDeviceUid: string;
   insertEmbedOnStop: boolean;
+  linkToDailyNote: boolean;
 }
 
 export const DEFAULT_SETTINGS: RMRSettings = {
@@ -34,6 +35,7 @@ export const DEFAULT_SETTINGS: RMRSettings = {
   monitor: false,
   inputDeviceUid: "",
   insertEmbedOnStop: true,
+  linkToDailyNote: false,
 };
 
 export class RMRSettingTab extends PluginSettingTab {
@@ -154,6 +156,33 @@ export class RMRSettingTab extends PluginSettingTab {
         })
       );
 
+    // 入力デバイス（sysrec list-devices で非同期に populate）
+    const deviceSetting = new Setting(containerEl)
+      .setName("既定の入力デバイス（マイク）")
+      .setDesc("録音ビューの初期値。空欄はシステム既定のマイク。");
+    deviceSetting.addDropdown((d) => {
+      d.addOption("", "既定");
+      d.setValue(this.plugin.settings.inputDeviceUid);
+      d.onChange(async (v) => {
+        this.plugin.settings.inputDeviceUid = v;
+        await this.plugin.saveSettings();
+      });
+      void this.plugin.listMicDevices().then((devices) => {
+        for (const dev of devices) d.addOption(dev.uid, dev.name);
+        d.setValue(this.plugin.settings.inputDeviceUid);
+      });
+    });
+
+    new Setting(containerEl)
+      .setName("モニター（入力の試聴）")
+      .setDesc("録音ビューの初期値。マイク入力を出力へ流します（ヘッドホン推奨・ハウリング注意）。")
+      .addToggle((t) =>
+        t.setValue(this.plugin.settings.monitor).onChange(async (v) => {
+          this.plugin.settings.monitor = v;
+          await this.plugin.saveSettings();
+        })
+      );
+
     new Setting(containerEl)
       .setName("サンプルレート")
       .addText((text) =>
@@ -187,6 +216,16 @@ export class RMRSettingTab extends PluginSettingTab {
       .addToggle((t) =>
         t.setValue(this.plugin.settings.insertEmbedOnStop).onChange(async (v) => {
           this.plugin.settings.insertEmbedOnStop = v;
+          await this.plugin.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("デイリーノートにも追記")
+      .setDesc("停止時に今日のデイリーノートへ ![[…]] を追記します（コア「デイリーノート」有効時）。")
+      .addToggle((t) =>
+        t.setValue(this.plugin.settings.linkToDailyNote).onChange(async (v) => {
+          this.plugin.settings.linkToDailyNote = v;
           await this.plugin.saveSettings();
         })
       );

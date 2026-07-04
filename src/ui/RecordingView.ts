@@ -1,6 +1,7 @@
 import { ItemView, Notice, WorkspaceLeaf, setIcon } from "obsidian";
 import type RemoteMeetingRecorderPlugin from "../main";
 import type { RecorderSource } from "../types";
+import type { MicDevice } from "../recorder/devices";
 import { WebAudioTap } from "../audio/webAudioTap";
 import { WaveformRenderer } from "../audio/waveform";
 import { defaultFilename, formatElapsed } from "../util/time";
@@ -19,7 +20,12 @@ export class RecordingView extends ItemView {
   private vSaveDir: string;
   private vTitle: string;
   private vAgc: boolean;
+  private vMicDevice: string;
+  private vMonitor: boolean;
   private consent = false;
+
+  // マイクデバイス一覧（list-devices・onOpen で取得）
+  private micDevices: MicDevice[] = [];
 
   // ライブ波形（マイク・表示専用）
   private tap: WebAudioTap | null = null;
@@ -38,6 +44,8 @@ export class RecordingView extends ItemView {
     this.vSaveDir = s.defaultSaveDir;
     this.vTitle = defaultFilename();
     this.vAgc = s.defaultAgc;
+    this.vMicDevice = s.inputDeviceUid;
+    this.vMonitor = s.monitor;
   }
 
   getViewType(): string {
@@ -53,6 +61,13 @@ export class RecordingView extends ItemView {
   async onOpen(): Promise<void> {
     this.plugin.registerRecordingView(this);
     this.render();
+    // マイク一覧を取得して Input ドロップダウンを更新
+    try {
+      this.micDevices = await this.plugin.listMicDevices();
+      if (!this.plugin.activeRecording) this.render();
+    } catch {
+      // 取得失敗は「既定」のみで続行
+    }
     // 録音中にビューを開き直したらマイクメーターを復帰（mic/both のみ）
     const active = this.plugin.activeRecording;
     if (active && active.source !== "system" && this.canvasEl && !this.tap) {
@@ -134,6 +149,8 @@ export class RecordingView extends ItemView {
     const panel = root.createDiv({ cls: "rmr-panel" });
     this.buildSourceRow(panel, active != null);
     this.buildSaveRow(panel, active != null);
+    this.buildInputRow(panel, active != null);
+    this.buildMonitorRow(panel);
     this.buildStaticRow(panel, "Format", "M4A（固定）");
     this.buildAgcRow(panel, active != null);
 
@@ -213,6 +230,34 @@ export class RecordingView extends ItemView {
     });
   }
 
+  private buildInputRow(panel: HTMLElement, locked: boolean): void {
+    const row = panel.createDiv({ cls: "rmr-row" });
+    row.createDiv({ cls: "rmr-row-label", text: "Input" });
+    const control = row.createDiv({ cls: "rmr-row-control" });
+    const select = control.createEl("select", { cls: "rmr-select dropdown" });
+    const optDefault = select.createEl("option", { text: "既定", value: "" });
+    if (!this.vMicDevice) optDefault.selected = true;
+    for (const dev of this.micDevices) {
+      const opt = select.createEl("option", { text: dev.name, value: dev.uid });
+      if (dev.uid === this.vMicDevice) opt.selected = true;
+    }
+    select.disabled = locked;
+    select.addEventListener("change", () => (this.vMicDevice = select.value));
+  }
+
+  private buildMonitorRow(panel: HTMLElement): void {
+    const row = panel.createDiv({ cls: "rmr-row" });
+    row.createDiv({ cls: "rmr-row-label", text: "Monitor" });
+    const control = row.createDiv({ cls: "rmr-row-control" });
+    const cb = control.createEl("input", { attr: { type: "checkbox" } });
+    cb.checked = this.vMonitor;
+    cb.addEventListener("change", () => {
+      this.vMonitor = cb.checked;
+      this.tap?.setMonitor(cb.checked); // 録音中でも表示専用タップに即反映
+    });
+    control.createSpan({ cls: "rmr-hint", text: "入力を試聴（ヘッドホン推奨）" });
+  }
+
   private buildStaticRow(panel: HTMLElement, label: string, value: string): void {
     const row = panel.createDiv({ cls: "rmr-row" });
     row.createDiv({ cls: "rmr-row-label", text: label });
@@ -244,6 +289,7 @@ export class RecordingView extends ItemView {
         filename: this.vTitle,
         agc: this.vAgc,
         label: this.vTitle,
+        micDevice: this.vMicDevice,
       });
     } catch (e) {
       new Notice(`録音を開始できませんでした: ${(e as Error).message}`);
@@ -268,7 +314,7 @@ export class RecordingView extends ItemView {
     if (!this.canvasEl) return; // メーター領域が無い（system など）
     try {
       this.tap = new WebAudioTap();
-      await this.tap.start(this.plugin.settings.inputDeviceUid || undefined, false);
+      await this.tap.start(this.vMicDevice || undefined, this.vMonitor);
       this.waveform = new WaveformRenderer(this.canvasEl, () => this.tap?.getLevel() ?? 0);
       this.waveform.start();
     } catch (e) {

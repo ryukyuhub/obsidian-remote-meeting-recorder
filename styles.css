@@ -110,7 +110,8 @@
   gap: 4px;
   cursor: pointer;
 }
-.rmr-save-input {
+.rmr-save-input,
+.rmr-select {
   flex: 1;
 }
 .rmr-hint,
