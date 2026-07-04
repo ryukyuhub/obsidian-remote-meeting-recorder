@@ -22,6 +22,7 @@
 
 import AVFoundation
 import ScreenCaptureKit
+import CoreGraphics
 import Darwin
 
 // ============================================================
@@ -637,6 +638,12 @@ func runMix(_ argv: [String]) -> Never {
 struct SysRec {
     static func main() {
         let argv = Array(CommandLine.arguments.dropFirst())
+
+        // 権限プリフライト（録音を開始せず画面収録許可の有無だけ返す。doctor 用）
+        // 終了コード: 0=許可あり / 2=許可なし
+        if argv.first == "check-permission" {
+            exit(CGPreflightScreenCaptureAccess() ? 0 : 2)
+        }
 
         // mix サブコマンド
         if argv.first == "mix" { runMix(Array(argv.dropFirst())) }
