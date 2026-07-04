@@ -21,6 +21,9 @@ export interface RMRSettings {
   inputDeviceUid: string;
   insertEmbedOnStop: boolean;
   linkToDailyNote: boolean;
+  enableGlobalHotkey: boolean;
+  globalHotkeyAccelerator: string;
+  enableControlWindow: boolean;
 }
 
 export const DEFAULT_SETTINGS: RMRSettings = {
@@ -36,6 +39,9 @@ export const DEFAULT_SETTINGS: RMRSettings = {
   inputDeviceUid: "",
   insertEmbedOnStop: true,
   linkToDailyNote: false,
+  enableGlobalHotkey: false,
+  globalHotkeyAccelerator: "CommandOrControl+Shift+R",
+  enableControlWindow: false,
 };
 
 export class RMRSettingTab extends PluginSettingTab {
@@ -229,5 +235,49 @@ export class RMRSettingTab extends PluginSettingTab {
           await this.plugin.saveSettings();
         })
       );
+
+    // --- 会議アプリ前面での操作（Phase 4） ---
+    containerEl.createEl("h3", { text: "会議アプリ前面での操作" });
+
+    new Setting(containerEl)
+      .setName("常時前面ミニ制御ウィンドウ")
+      .setDesc("録音中、波形と停止ボタンを会議アプリの前面に浮かべます。")
+      .addToggle((t) =>
+        t.setValue(this.plugin.settings.enableControlWindow).onChange(async (v) => {
+          this.plugin.settings.enableControlWindow = v;
+          await this.plugin.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("グローバルホットキー")
+      .setDesc("Obsidian が非フォーカスでも効くホットキー。録音中は停止、停止中は録音ビューを開きます。")
+      .addToggle((t) =>
+        t.setValue(this.plugin.settings.enableGlobalHotkey).onChange(async (v) => {
+          this.plugin.settings.enableGlobalHotkey = v;
+          await this.plugin.saveSettings();
+          this.plugin.registerHotkeys();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("ホットキーの割り当て")
+      .setDesc("Electron 形式（例: CommandOrControl+Shift+R）。")
+      .addText((text) =>
+        text
+          .setPlaceholder("CommandOrControl+Shift+R")
+          .setValue(this.plugin.settings.globalHotkeyAccelerator)
+          .onChange(async (v) => {
+            this.plugin.settings.globalHotkeyAccelerator = v.trim();
+            await this.plugin.saveSettings();
+            this.plugin.registerHotkeys();
+          })
+      );
+
+    const note = containerEl.createEl("p", { cls: "rmr-settings-note" });
+    note.setText(
+      "⚠ macOS ではグローバルホットキーに「アクセシビリティ」権限が必要です。" +
+        "効かない場合は システム設定 > プライバシーとセキュリティ > アクセシビリティ で Obsidian を許可してください。"
+    );
   }
 }

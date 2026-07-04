@@ -2,7 +2,6 @@ import { ItemView, Notice, WorkspaceLeaf, setIcon } from "obsidian";
 import type RemoteMeetingRecorderPlugin from "../main";
 import type { RecorderSource } from "../types";
 import type { MicDevice } from "../recorder/devices";
-import { WebAudioTap } from "../audio/webAudioTap";
 import { WaveformRenderer } from "../audio/waveform";
 import { defaultFilename, formatElapsed } from "../util/time";
 
@@ -27,8 +26,7 @@ export class RecordingView extends ItemView {
   // マイクデバイス一覧（list-devices・onOpen で取得）
   private micDevices: MicDevice[] = [];
 
-  // ライブ波形（マイク・表示専用）
-  private tap: WebAudioTap | null = null;
+  // ライブ波形（レベルはプラグイン所有のマイクタップから読む）
   private waveform: WaveformRenderer | null = null;
 
   // DOM 参照
@@ -70,13 +68,13 @@ export class RecordingView extends ItemView {
     }
     // 録音中にビューを開き直したらマイクメーターを復帰（mic/both のみ）
     const active = this.plugin.activeRecording;
-    if (active && active.source !== "system" && this.canvasEl && !this.tap) {
-      await this.startTap();
+    if (active && active.source !== "system" && this.canvasEl) {
+      this.startWaveform();
     }
   }
 
   async onClose(): Promise<void> {
-    this.stopTap();
+    this.stopWaveform(); // タップはプラグイン所有なので止めない
     this.plugin.unregisterRecordingView(this);
   }
 
@@ -94,9 +92,9 @@ export class RecordingView extends ItemView {
     if (this.timerEl) this.timerEl.setText(formatElapsed(sec));
   }
 
-  /** 終端イベント受信: タップ停止 + 再描画。 */
+  /** 終端イベント受信: 波形停止 + 再描画。 */
   onTerminal(): void {
-    this.stopTap();
+    this.stopWaveform();
     this.render();
   }
 
@@ -253,7 +251,7 @@ export class RecordingView extends ItemView {
     cb.checked = this.vMonitor;
     cb.addEventListener("change", () => {
       this.vMonitor = cb.checked;
-      this.tap?.setMonitor(cb.checked); // 録音中でも表示専用タップに即反映
+      this.plugin.setMonitor(cb.checked); // 録音中でも表示専用タップに即反映
     });
     control.createSpan({ cls: "rmr-hint", text: "入力を試聴（ヘッドホン推奨）" });
   }
@@ -290,45 +288,38 @@ export class RecordingView extends ItemView {
         agc: this.vAgc,
         label: this.vTitle,
         micDevice: this.vMicDevice,
+        monitor: this.vMonitor,
       });
     } catch (e) {
       new Notice(`録音を開始できませんでした: ${(e as Error).message}`);
       this.render();
       return;
     }
-    // 先に録音状態で再描画（canvas を生成）してから、その canvas にタップを繋ぐ
+    // 先に録音状態で再描画（canvas を生成）してから波形を繋ぐ（タップはプラグインが起動）
     this.render();
     if (this.plugin.activeRecording && this.plugin.activeRecording.source !== "system") {
-      await this.startTap();
+      this.startWaveform();
     }
   }
 
   private async onStop(): Promise<void> {
     if (!this.recording) return;
-    this.stopTap();
+    this.stopWaveform();
     await this.plugin.stopActiveRecording();
     this.render();
   }
 
-  private async startTap(): Promise<void> {
-    if (!this.canvasEl) return; // メーター領域が無い（system など）
-    try {
-      this.tap = new WebAudioTap();
-      await this.tap.start(this.vMicDevice || undefined, this.vMonitor);
-      this.waveform = new WaveformRenderer(this.canvasEl, () => this.tap?.getLevel() ?? 0);
-      this.waveform.start();
-    } catch (e) {
-      // マイクタップ失敗は録音自体には影響しない（表示専用）
-      new Notice(`マイクメーターを開始できませんでした（録音は継続）: ${(e as Error).message}`);
-      this.stopTap();
-    }
+  /** プラグイン所有のマイクタップからレベルを読んで波形を描く。 */
+  private startWaveform(): void {
+    if (!this.canvasEl) return;
+    this.stopWaveform();
+    this.waveform = new WaveformRenderer(this.canvasEl, () => this.plugin.getMicLevel());
+    this.waveform.start();
   }
 
-  private stopTap(): void {
+  private stopWaveform(): void {
     this.waveform?.stop();
     this.waveform = null;
-    this.tap?.stop();
-    this.tap = null;
   }
 }
 

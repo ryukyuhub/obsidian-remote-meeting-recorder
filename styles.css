@@ -134,6 +134,12 @@
   font-size: 0.85em;
 }
 
+.rmr-settings-note {
+  color: var(--text-muted);
+  font-size: 0.85em;
+  padding: 4px 0;
+}
+
 /* --- 診断モーダル --- */
 .rmr-doctor .setting-item {
   border-top: 1px solid var(--background-modifier-border);

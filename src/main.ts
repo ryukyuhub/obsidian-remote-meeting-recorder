@@ -15,6 +15,10 @@ import { insertEmbed, computeVaultRelative } from "./ui/embed";
 import { listMicDevices, type MicDevice } from "./recorder/devices";
 import { linkToDailyNote } from "./ui/dailyNote";
 import { rotateLogs } from "./state/sessionStore";
+import { WebAudioTap } from "./audio/webAudioTap";
+import { GlobalHotkeys } from "./platform/hotkeys";
+import { ControlWindowManager } from "./ui/controlWindow";
+import { getElectronRemote } from "./platform/electron";
 
 /** ビューが操作する前面録音の情報（primary）。 */
 export interface ActiveRecordingInfo {
@@ -32,6 +36,7 @@ export interface StartFromViewInput {
   agc: boolean;
   label?: string;
   micDevice?: string;
+  monitor?: boolean;
 }
 
 export default class RemoteMeetingRecorderPlugin extends Plugin {
@@ -46,6 +51,11 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
   private recordingView: RecordingView | null = null;
   private lastWarningSessionId: string | null = null;
   private finalizedCallbacks: Array<(ev: TerminalEvent) => void> = [];
+
+  // マイクの表示専用タップ（録音ビュー・ミニ窓の両方が参照する一元所有・§3.4）
+  private micTap: WebAudioTap | null = null;
+  private hotkeys = new GlobalHotkeys();
+  private controlWindow: ControlWindowManager | null = null;
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -85,6 +95,9 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
       callback: () => new DoctorModal(this.app, this).open(),
     });
 
+    // グローバルホットキー（設定で有効時のみ）
+    this.registerHotkeys();
+
     // 起動時: 孤児掃除 → セッション復元（設計書 §7）
     this.app.workspace.onLayoutReady(() => this.restoreSessions());
 
@@ -95,6 +108,11 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
     // 録音は殺さない。watcher の interval を止めるだけ（設計書 §6-7）。
     for (const w of this.watchers.values()) w.stop();
     this.watchers.clear();
+    // ホットキーとミニ窓は残すとゾンビ化するので確実に破棄（表示専用・録音には非影響）
+    this.hotkeys.unregisterAll();
+    this.controlWindow?.destroy();
+    this.controlWindow = null;
+    this.stopMicTap();
     console.log("[remote-meeting-recorder] unloaded（録音プロセスは継続）");
   }
 
@@ -181,7 +199,39 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
       label: meta.label,
     };
     this.startWatcher(meta);
+    if (meta.source !== "system") {
+      this.startMicTap(opts.micDevice, input.monitor ?? this.settings.monitor);
+    }
+    this.maybeOpenControlWindow();
     new Notice(`録音を開始しました（${input.source}）`);
+  }
+
+  // ================================================================
+  // マイク表示専用タップ（録音ビュー・ミニ窓が参照）
+  // ================================================================
+  private startMicTap(deviceId: string | undefined, monitor: boolean): void {
+    this.stopMicTap();
+    const tap = new WebAudioTap();
+    this.micTap = tap;
+    void tap.start(deviceId || undefined, monitor).catch((e) => {
+      new Notice(`マイクメーターを開始できませんでした（録音は継続）: ${(e as Error).message}`);
+      if (this.micTap === tap) this.micTap = null;
+    });
+  }
+
+  private stopMicTap(): void {
+    this.micTap?.stop();
+    this.micTap = null;
+  }
+
+  /** 現在のマイク入力レベル（0..1・表示専用）。録音ビュー/ミニ窓が読む。 */
+  getMicLevel(): number {
+    return this.micTap?.getLevel() ?? 0;
+  }
+
+  /** モニター（試聴）オン/オフをタップに反映。 */
+  setMonitor(on: boolean): void {
+    this.micTap?.setMonitor(on);
   }
 
   private startWatcher(meta: SessionMeta): void {
@@ -200,6 +250,7 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
     if (this.activeRecording?.sessionId !== sessionId) return;
     this.statusBar.setRecording(elapsedSec);
     this.recordingView?.setElapsed(elapsedSec);
+    this.controlWindow?.tick(elapsedSec);
   }
 
   async stopActiveRecording(): Promise<void> {
@@ -236,7 +287,11 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
     this.watchers.delete(sessionId);
 
     const wasActive = this.activeRecording?.sessionId === sessionId;
-    if (wasActive) this.activeRecording = null;
+    if (wasActive) {
+      this.activeRecording = null;
+      this.stopMicTap();
+      this.controlWindow?.close();
+    }
 
     switch (ev.event) {
       case "stopped":
@@ -313,6 +368,73 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
   }
 
   // ================================================================
+  // 常時前面ミニ制御ウィンドウ（§9.4・§14.3）
+  // ================================================================
+  private maybeOpenControlWindow(): void {
+    if (!this.settings.enableControlWindow || !this.activeRecording) return;
+    if (!this.controlWindow) this.controlWindow = new ControlWindowManager(this.getPluginDir());
+    const accent =
+      getComputedStyle(document.body).getPropertyValue("--interactive-accent").trim() || "#7c6cf0";
+    const ok = this.controlWindow.open(
+      {
+        source: this.activeRecording.source,
+        accent,
+        label: this.activeRecording.label ?? "録音中",
+      },
+      () => void this.stopActiveRecording(),
+      () => this.getMicLevel()
+    );
+    if (!ok) new Notice("ミニ制御ウィンドウを開けませんでした（この環境では未対応）。");
+  }
+
+  // ================================================================
+  // グローバルホットキー（§9.4・§14.3）
+  // ================================================================
+  /** 設定に応じてグローバルホットキーを（再）登録。設定変更時にも呼ぶ。 */
+  registerHotkeys(): void {
+    this.hotkeys.unregisterAll();
+    if (!this.settings.enableGlobalHotkey) return;
+    const acc = this.settings.globalHotkeyAccelerator?.trim();
+    if (!acc) return;
+    if (!this.hotkeys.available()) {
+      new Notice("グローバルホットキーはこの環境で利用できません。");
+      return;
+    }
+    const ok = this.hotkeys.register(acc, () => this.onHotkeyToggle());
+    if (!ok) {
+      new Notice(
+        `グローバルホットキー「${acc}」を登録できませんでした。` +
+          `他アプリと競合、または macOS のアクセシビリティ権限が必要です。`,
+        10000
+      );
+    }
+  }
+
+  private onHotkeyToggle(): void {
+    if (this.activeRecording) {
+      void this.stopActiveRecording();
+      new Notice("録音を停止しました（ホットキー）");
+    } else {
+      // 同意契約を守るため自動開始はせず、ビューを前面に出す
+      this.focusApp();
+      void this.openRecordingView();
+      new Notice("録音ビューを開きました（同意を確認して録音してください）");
+    }
+  }
+
+  private focusApp(): void {
+    try {
+      const remote = getElectronRemote();
+      const win = (remote as { getCurrentWindow?: () => { show?: () => void; focus?: () => void } })
+        ?.getCurrentWindow?.();
+      win?.show?.();
+      win?.focus?.();
+    } catch {
+      /* noop */
+    }
+  }
+
+  // ================================================================
   // remix 復旧
   // ================================================================
   async remixLastFailed(): Promise<void> {
@@ -358,6 +480,13 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
     }
     if (result.active.length > 0) {
       new Notice(`録音中のセッションを ${result.active.length} 件復元しました。`);
+    }
+    // primary の表示専用タップ・ミニ窓も復帰（reload をまたいでも操作できるように）
+    if (this.activeRecording) {
+      if (this.activeRecording.source !== "system") {
+        this.startMicTap(this.settings.inputDeviceUid || undefined, this.settings.monitor);
+      }
+      this.maybeOpenControlWindow();
     }
 
     for (const meta of result.needsRemix) {
