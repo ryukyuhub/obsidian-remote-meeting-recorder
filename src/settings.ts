@@ -65,6 +65,12 @@ export class RMRSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
 
+    // --- バージョン表示（BRAT 配布で現在版が分かるように） ---
+    new Setting(containerEl)
+      .setName(this.plugin.manifest.name)
+      .setDesc(`バージョン ${this.plugin.manifest.version}`)
+      .setHeading();
+
     // --- バイナリ ---
     new Setting(containerEl).setName("録音エンジン（sysrec）").setHeading();
 
