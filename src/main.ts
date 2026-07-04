@@ -20,6 +20,7 @@ import { GlobalHotkeys } from "./platform/hotkeys";
 import { ControlWindowManager } from "./ui/controlWindow";
 import { getElectronRemote } from "./platform/electron";
 import { runTranscription } from "./transcribe/runTranscription";
+import { TranscribePicker } from "./ui/TranscribePicker";
 
 /** ビューが操作する前面録音の情報（primary）。 */
 export interface ActiveRecordingInfo {
@@ -89,6 +90,11 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
       id: "remix-last-failed",
       name: "失敗した録音を remix 復旧",
       callback: () => void this.remixLastFailed(),
+    });
+    this.addCommand({
+      id: "transcribe-file",
+      name: "録音ファイルを文字起こし",
+      callback: () => new TranscribePicker(this).open(),
     });
     this.addCommand({
       id: "run-doctor",
@@ -372,6 +378,12 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
   /** マイク入力デバイス一覧（sysrec list-devices）。 */
   async listMicDevices(): Promise<MicDevice[]> {
     return listMicDevices(this.buildContext().resolveBinPath());
+  }
+
+  /** 既存の録音ファイルを手動で文字起こし（アクティブノートがあればそこへ追記）。 */
+  async transcribeFile(audioPath: string): Promise<void> {
+    const target = this.app.workspace.getActiveViewOfType(MarkdownView)?.file ?? null;
+    await runTranscription(this, audioPath, target);
   }
 
   // ================================================================

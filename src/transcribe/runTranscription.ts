@@ -51,7 +51,7 @@ export async function runTranscription(
     }
 
     const md = buildMarkdown(s.transcriptPostAction, text.trim(), summaryMd, s.transcribeLanguage);
-    await appendResult(plugin.app, target, audioPath, md, s.saveInVault);
+    await appendResult(plugin.app, target, audioPath, md);
 
     notice.hide();
     new Notice("文字起こしが完了しました。");
@@ -174,27 +174,41 @@ async function appendResult(
   app: App,
   target: TFile | null,
   audioPath: string,
-  md: string,
-  saveInVault: boolean
+  md: string
 ): Promise<void> {
+  // 1) 指定ノート（開始時ノート or アクティブノート）
   if (target) {
     await app.vault.append(target, md);
     return;
   }
-  if (saveInVault) {
-    const rel = computeVaultRelative(app, audioPath);
-    if (rel) {
-      const notePath = rel.replace(/\.m4a$/i, ".md");
-      let file = app.vault.getAbstractFileByPath(notePath);
-      if (!file) {
-        const stem = path.basename(notePath, ".md");
-        file = await app.vault.create(notePath, `# ${stem}\n\n![[${rel}]]\n`);
-      }
-      if (file instanceof TFile) {
-        await app.vault.append(file, md);
-        return;
-      }
+  // 2) Vault 内の録音 → 隣にコンパニオンノート（拡張子は汎用的に .md へ）
+  const rel = computeVaultRelative(app, audioPath);
+  if (rel) {
+    const notePath = rel.replace(/\.[^./]+$/, ".md");
+    const file = await ensureNote(app, notePath, `![[${rel}]]\n`);
+    if (file) {
+      await app.vault.append(file, md);
+      return;
     }
   }
-  new Notice("文字起こし結果の保存先ノートが見つかりませんでした。");
+  // 3) Vault 外 → Vault ルートに新規ノート
+  const stem = path.basename(audioPath).replace(/\.[^./]+$/, "");
+  const file = await ensureNote(app, `文字起こし-${stem}.md`, `# ${stem}\n`);
+  if (file) {
+    await app.vault.append(file, md);
+    return;
+  }
+  new Notice("文字起こし結果の保存先ノートを作成できませんでした。");
+}
+
+async function ensureNote(app: App, notePath: string, initial: string): Promise<TFile | null> {
+  const existing = app.vault.getAbstractFileByPath(notePath);
+  if (existing instanceof TFile) return existing;
+  if (existing) return null; // 同名フォルダ等
+  try {
+    const stem = path.basename(notePath, ".md");
+    return await app.vault.create(notePath, `# ${stem}\n\n${initial}`);
+  } catch {
+    return null;
+  }
 }
