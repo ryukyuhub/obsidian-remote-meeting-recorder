@@ -12,7 +12,7 @@ your notes.
 
 Electron/Chromium alone cannot reliably capture macOS system audio, so recording
 is handled by a small external helper, `sysrec`, written in Swift on top of
-Apple's **ScreenCaptureKit**. The plugin runs it as a subprocess and treats the
+Apple's **Core Audio process taps**. The plugin runs it as a subprocess and treats the
 filesystem (`~/.meeting-recorder/`) as the source of truth, so an in-progress
 recording survives an Obsidian reload or crash. The plugin never ships or
 downloads a prebuilt binary; you build `sysrec` from the source in this
@@ -36,13 +36,14 @@ repository (see [Installation](#installation)).
 
 ## Requirements
 
-- **macOS** with ScreenCaptureKit (macOS 13+; developed on macOS 15/26, Apple
-  Silicon). Desktop only.
+- **macOS** with Core Audio process taps (macOS 14.4+; developed on macOS 15/26,
+  Apple Silicon). Desktop only.
 - **Xcode command line tools** (`swiftc`) to build the `sysrec` helper.
 - Optional, for transcription: `whisper-cpp` (`brew install whisper-cpp`) or a
   local build via `npm run build-whisper`, plus a ggml model (downloadable from
   the doctor panel).
-- **Screen Recording permission** for Obsidian (macOS asks on first recording).
+- **Microphone permission** for Obsidian (macOS asks on first recording). Screen
+  recording is not required — system audio is captured via Core Audio taps.
 
 ## Installation
 
@@ -61,7 +62,7 @@ No Xcode or terminal needed — the `sysrec` helper is downloaded with one click
 3. Enable the plugin, open its settings, and run **Diagnostics (doctor)**. If the
    `sysrec` helper is missing, click **"sysrec を取得"** — it downloads the
    ad-hoc-signed helper from the latest release and installs it.
-4. Grant **Screen Recording** permission to Obsidian when prompted.
+4. Grant **Microphone** permission to Obsidian when prompted.
 
 The bundled `sysrec` is ad-hoc signed (not notarized). It is fetched over HTTPS
 and run as a subprocess by Obsidian; macOS does not prompt for Gatekeeper in this
@@ -88,9 +89,9 @@ path, and the doctor clears any quarantine attribute after download.
 4. Open the plugin settings and run **Diagnostics (doctor)** to verify the
    binary, permissions, and (optionally) transcription.
 
-5. Grant **Screen Recording** permission to Obsidian when prompted
-   (System Settings → Privacy & Security → Screen Recording). It is required even
-   for microphone-only recording because ScreenCaptureKit is used internally.
+5. Grant **Microphone** permission to Obsidian when prompted
+   (System Settings → Privacy & Security → Microphone). Screen recording is not
+   required — system audio is captured via Core Audio taps.
 
 ## Usage
 
@@ -109,8 +110,8 @@ You can also right-click any note in the file explorer and choose
 Run **Diagnostics (doctor)** from the plugin settings first — it reports the most
 common issues.
 
-- **"Screen Recording permission not granted"** — enable Obsidian under System
-  Settings → Privacy & Security → Screen Recording, then fully restart Obsidian.
+- **"Microphone permission not granted"** — enable Obsidian under System
+  Settings → Privacy & Security → Microphone, then fully restart Obsidian.
 - **`sysrec` not found** — run `npm run build-sysrec` (requires `swiftc`).
 - **Transcription does nothing** — install `whisper-cpp`
   (`brew install whisper-cpp`) and download a model from the doctor panel. GUI
@@ -138,7 +139,7 @@ ln -s "$(pwd)" <vault>/.obsidian/plugins/remote-meeting-recorder
 
 ## Architecture
 
-- **`sysrec`** (`native/sysrec/`, Swift/ScreenCaptureKit) is the recording engine,
+- **`sysrec`** (`native/sysrec/`, Swift/Core Audio taps) is the recording engine,
   spawned as a subprocess. It outlives the renderer, so all session state lives on
   disk under `~/.meeting-recorder/`.
 - The **state machine** (start / stop / mix / sweep / watch / restore) is

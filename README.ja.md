@@ -10,7 +10,7 @@ English documentation: [README.md](README.md)
 ## なぜ外部ヘルパーバイナリが必要か
 
 Electron/Chromium だけでは macOS のシステム音声を確実に録れないため、録音は
-Apple の **ScreenCaptureKit** を使う小さな外部ヘルパー `sysrec`（Swift）が担当
+Apple の **Core Audio プロセスタップ** を使う小さな外部ヘルパー `sysrec`（Swift）が担当
 します。プラグインはこれをサブプロセスとして起動し、真実の源をファイルシステム
 （`~/.meeting-recorder/`）に置くので、Obsidian のリロードやクラッシュがあっても
 録音中のセッションを復元できます。**プレビルドのバイナリは同梱も配布もせず**、
@@ -31,12 +31,12 @@ Apple の **ScreenCaptureKit** を使う小さな外部ヘルパー `sysrec`（S
 
 ## 動作要件
 
-- **macOS**（ScreenCaptureKit。macOS 13 以降。開発は macOS 15/26・Apple Silicon）。
+- **macOS**（Core Audio プロセスタップ。macOS 14.4 以降。開発は macOS 15/26・Apple Silicon）。
   デスクトップ専用。
 - `sysrec` をビルドするための **Xcode コマンドラインツール**（`swiftc`）。
 - 文字起こし（任意）: `whisper-cpp`（`brew install whisper-cpp`）または
   `npm run build-whisper`、および ggml モデル（doctor から取得可能）。
-- Obsidian への**画面収録権限**（初回録音時に macOS が確認）。
+- Obsidian への**マイク権限**（初回録音時に macOS が確認）。画面収録権限は不要です。
 
 ## インストール
 
@@ -55,7 +55,7 @@ Xcode もターミナルも不要 — `sysrec` ヘルパーはワンクリック
 3. プラグインを有効化し、設定の**診断（doctor）**を開く。`sysrec` が無ければ
    **「sysrec を取得」**をクリック — 最新リリースから ad-hoc 署名済みヘルパーを
    ダウンロードして配置します。
-4. 求められたら Obsidian に**画面収録**権限を付与。
+4. 求められたら Obsidian に**マイク**権限を付与。
 
 同梱の `sysrec` は ad-hoc 署名（未公証）です。HTTPS で取得され Obsidian から
 サブプロセスとして起動されます。この経路では Gatekeeper のダイアログは出ず、
@@ -80,9 +80,9 @@ doctor がダウンロード後に隔離属性を除去します。
 
 4. プラグイン設定の**診断（doctor）**でバイナリ・権限・（任意で）文字起こしを確認。
 
-5. 求められたら Obsidian に**画面収録**権限を付与（システム設定 → プライバシーと
-   セキュリティ → 画面収録）。マイクのみの録音でも内部で ScreenCaptureKit を使う
-   ため必要です。
+5. 求められたら Obsidian に**マイク**権限を付与（システム設定 → プライバシーと
+   セキュリティ → マイク）。システム音声は Core Audio タップで取得するため画面収録
+   権限は不要です。
 
 ## 使い方
 
