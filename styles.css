@@ -157,6 +157,13 @@
   font-size: 0.85em;
   padding: 4px 0;
 }
+/* Whisper モデルの取得状態 */
+.rmr-settings-note.rmr-model-ok {
+  color: var(--color-green);
+}
+.rmr-settings-note.rmr-model-missing {
+  color: var(--color-orange);
+}
 
 /* --- 診断モーダル --- */
 .rmr-doctor .setting-item {

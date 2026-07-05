@@ -1,6 +1,10 @@
 import * as fs from "fs";
 import * as path from "path";
 import { findOnPath, isFile } from "../util/pathProbe";
+import { execFileAsync } from "../util/exec";
+
+// Whisper モデル（数百MB〜）のダウンロードタイムアウト（ms）
+const MODEL_DOWNLOAD_TIMEOUT_MS = 1_800_000;
 
 /* whisper.cpp バイナリ / モデルの解決（sysrec の resolveBin と共通の探索処理を使う）。 */
 
@@ -91,4 +95,22 @@ export function modelDownloadTarget(pluginDir: string, modelName: string): strin
   const name = modelName.startsWith("ggml-") ? modelName : `ggml-${modelName}`;
   const fileName = name.endsWith(".bin") ? name : `${name}.bin`;
   return path.join(whisperModelsDir(pluginDir), fileName);
+}
+
+/**
+ * Hugging Face から ggml モデルをダウンロードして native/whisper/models/ に配置する。
+ * 診断（doctor）と設定画面の「ダウンロード」の両方から呼ぶ。返り値は配置先の絶対パス。
+ */
+export async function downloadWhisperModel(
+  pluginDir: string,
+  modelName: string
+): Promise<string> {
+  const target = modelDownloadTarget(pluginDir, modelName);
+  fs.mkdirSync(whisperModelsDir(pluginDir), { recursive: true });
+  const url =
+    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/" + path.basename(target);
+  await execFileAsync("curl", ["-L", "--fail", "-o", target, url], {
+    timeout: MODEL_DOWNLOAD_TIMEOUT_MS,
+  });
+  return target;
 }

@@ -11,15 +11,13 @@ import {
   resolveWhisperBin,
   resolveWhisperModel,
   whisperDir,
-  whisperModelsDir,
-  modelDownloadTarget,
+  downloadWhisperModel,
 } from "../transcribe/resolveWhisper";
 
 // 外部コマンドのタイムアウト（ms）
 const PROBE_TIMEOUT_MS = 5000; // codesign/lipo/xattr/list-devices 等の短命プローブ
 const BUILD_TIMEOUT_MS = 120_000; // sysrec のビルド
 const DOWNLOAD_TIMEOUT_MS = 300_000; // sysrec バイナリのダウンロード
-const MODEL_DOWNLOAD_TIMEOUT_MS = 1_800_000; // Whisper モデル（数百MB〜）
 const ZIP_DOWNLOAD_TIMEOUT_MS = 600_000; // Windows whisper.cpp zip（DLL 同梱で大きめ）
 const EXTRACT_TIMEOUT_MS = 120_000; // tar による zip 展開
 
@@ -416,12 +414,7 @@ function transcribeChecks(ctx: RecorderContext): DoctorCheck[] {
       : {
           label: `${dlName} を取得`,
           run: async () => {
-            const target = modelDownloadTarget(ctx.pluginDir, dlName);
-            fs.mkdirSync(whisperModelsDir(ctx.pluginDir), { recursive: true });
-            const url =
-              "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/" +
-              path.basename(target);
-            await curlDownload(url, target, MODEL_DOWNLOAD_TIMEOUT_MS);
+            const target = await downloadWhisperModel(ctx.pluginDir, dlName);
             return `ダウンロード完了: ${target}`;
           },
         },

@@ -1,8 +1,9 @@
-import { App, PluginSettingTab, Setting, Notice } from "obsidian";
+import { App, PluginSettingTab, Setting, Notice, ButtonComponent } from "obsidian";
 import type RemoteMeetingRecorderPlugin from "./main";
 import type { RecorderSource } from "./types";
 import { binCandidates } from "./util/resolveBin";
 import { DoctorModal } from "./ui/DoctorModal";
+import { resolveWhisperModel, downloadWhisperModel } from "./transcribe/resolveWhisper";
 
 /** プラグイン設定（設計書 §9.3）。録音ごとの値はビューが持ち、ここは初期プリセット。 */
 export interface RMRSettings {
@@ -257,29 +258,88 @@ export class RMRSettingTab extends PluginSettingTab {
       (v) => (s.transcribeOnStop = v)
     );
 
-    this.bindDropdown(
-      "Whisper モデル",
-      "精度と速度のトレードオフ。CPU のみで遅い場合は small / base が速い。" +
-        "変更したら「診断（doctor）」でモデルを取得してください。",
-      [
-        ["large-v3-turbo-q5_0", "large-v3-turbo（高精度・やや重い）"],
-        ["small", "small（速い・バランス）"],
-        ["base", "base（最速・軽量）"],
-      ],
-      () => s.whisperCppModel || "large-v3-turbo-q5_0",
-      (v) => (s.whisperCppModel = v)
-    );
+    // Whisper モデル: 選択 → その場で状態表示 → 未取得ならこの画面でダウンロード。
+    // （以前は「診断（doctor）」に誘導していたが分かりにくいため設定画面で完結させる）
+    const modelOptions: [string, string][] = [
+      ["large-v3-turbo-q5_0", "large-v3-turbo（高精度・やや重い）"],
+      ["small", "small（速い・バランス）"],
+      ["base", "base（最速・軽量）"],
+    ];
+
+    const modelSetting = new Setting(containerEl)
+      .setName("Whisper モデル")
+      .setDesc(
+        "文字起こしの精度と速度のトレードオフ。CPU のみで遅い場合は small / base が速い。" +
+          "下の状態が「未取得」なら、この画面の「ダウンロード」ボタンで入手できます（数百MB〜）。"
+      );
+
+    // モデルの有無を表示する行（モデル変更・ダウンロードのたびに更新する）
+    const modelStatus = containerEl.createEl("p", { cls: "rmr-settings-note" });
+    let dlButton: ButtonComponent;
+
+    const currentModelName = (): string => (s.whisperCppModel || "large-v3-turbo-q5_0").trim();
+
+    const refreshModelStatus = (): void => {
+      const name = currentModelName();
+      const present = !!resolveWhisperModel(this.plugin.getPluginDir(), name);
+      modelStatus.removeClass("rmr-model-ok", "rmr-model-missing");
+      if (present) {
+        modelStatus.addClass("rmr-model-ok");
+        modelStatus.setText(`状態: 取得済み（${name}）— このモデルで文字起こしできます。`);
+        dlButton.setButtonText("再ダウンロード").removeCta();
+      } else {
+        modelStatus.addClass("rmr-model-missing");
+        modelStatus.setText(`状態: 未取得（${name}）— 「ダウンロード」で入手してください。`);
+        dlButton.setButtonText("ダウンロード").setCta();
+      }
+    };
+
+    modelSetting.addDropdown((d) => {
+      for (const [value, label] of modelOptions) d.addOption(value, label);
+      d.setValue(currentModelName()).onChange(async (v) => {
+        s.whisperCppModel = v;
+        await this.plugin.saveSettings();
+        refreshModelStatus();
+      });
+    });
+
+    modelSetting.addButton((btn) => {
+      dlButton = btn;
+      btn.onClick(async () => {
+        const name = currentModelName();
+        btn.setDisabled(true).setButtonText("ダウンロード中…");
+        try {
+          const target = await downloadWhisperModel(this.plugin.getPluginDir(), name);
+          new Notice(`モデルを取得しました:\n${target}`);
+        } catch (e) {
+          new Notice(
+            `モデルのダウンロードに失敗しました: ${(e as Error).message}\n` +
+              "ネットワークを確認するか、「診断（doctor）」から再試行してください。"
+          );
+        } finally {
+          btn.setDisabled(false);
+          refreshModelStatus();
+        }
+      });
+    });
+
+    refreshModelStatus();
 
     const whisperNote = containerEl.createEl("p", { cls: "rmr-settings-note" });
     whisperNote.setText(
-      "whisper.cpp バイナリは自動検出されます。選んだモデルの入手・状態確認は「診断（doctor）」から行えます。"
+      "文字起こしに使うプログラム（whisper.cpp 本体）は自動で見つけます。" +
+        "見つからない・うまく動かないときは、上の「診断（doctor）」で状態と対処を確認できます。"
     );
 
-    this.bindText(
+    this.bindDropdown(
       "言語",
-      "例: ja / en / auto。",
-      "ja",
-      () => s.transcribeLanguage,
+      "文字起こしの言語。日本語か英語を選ぶと精度が安定します。auto は音声から自動判定します。",
+      [
+        ["ja", "日本語（ja）"],
+        ["en", "英語（en）"],
+        ["auto", "自動判定（auto）"],
+      ],
+      () => (["ja", "en", "auto"].includes(s.transcribeLanguage) ? s.transcribeLanguage : "ja"),
       (v) => (s.transcribeLanguage = v)
     );
   }
