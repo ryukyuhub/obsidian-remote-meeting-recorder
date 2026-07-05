@@ -11,8 +11,9 @@
 - **問題**: 録音中に Netflix の映像が黒くなる（macOS のみ・Netflix 等 DRM 動画のみ）。
 - **原因**: sysrec がシステム音声を **ScreenCaptureKit（画面キャプチャ API）** で取得しており、OS が「画面録画中」状態になる。DRM プレイヤーはこれを検知して保護映像を黒く落とす（正常な保護動作）。
 - **対策**: システム音声の取得を **Core Audio プロセスタップ（macOS 14.4+ / `AudioHardwareCreateProcessTap` + `CATapDescription`）** に置き換える。画面キャプチャをしなくなるので DRM 映像は黒くならない。
-- **要注意スコープ**: マイク取得も現状 SCK（`captureMicrophone`）。**マイク単独の SCStream でも「画面録画中」になり黒くなるなら、マイクも SCK から外す必要がある**（→ SCK 完全撤去）。ここが最大の未確定。**Spike で最初に確定させる（検証項目 ④）**。
-- **進め方**: いきなり全書き換えせず、**最小の検証（spike）→ スコープ確定 → 段階実装（SCK はフォールバックとして一時併存）**。
+- **要注意スコープ**: マイク取得も現状 SCK（`captureMicrophone`）。**マイク単独の SCStream でも「画面録画中」になり黒くなるなら、マイクも SCK から外す必要がある**（→ SCK 完全撤去）。
+  - **【2026-07-05 Spike で確定】マイク単独 SCStream でも黒くなった（④=YES）。⇒ SCK 完全撤去に決定。システム音声＝Core Audio タップ／マイク＝AVAudioEngine の両方を作り替える。スコープ＝大。** 詳細は §10。
+- **進め方**: いきなり全書き換えせず、**最小の検証（spike）→ スコープ確定 → 段階実装（SCK はフォールバックとして一時併存）**。← Spike 完了、次は段階実装へ。
 
 ---
 
@@ -206,12 +207,21 @@ AudioHardwareCreateProcessTap(desc, &tapID)
 
 ## 10. 未解決の確認事項（Spike で潰す）
 
-- [ ] タップに必要な **TCC 権限の種別**（画面収録でない何か）と、初回プロンプトの文言・タイミング。
+### Spike 実施結果（2026-07-05・`native/sysrec/spike/` 実機実行）
+
+- [x] **④ マイク単独 SCStream が DRM を誘発するか＝スコープ確定** → **YES（黒くなる）**。`micsck`（`capturesAudio=false` / `captureMicrophone=true`）稼働中に Netflix が黒画面化。mic 受信サンプル 1,000,960（＝mic 経路は生きた状態での確認）。**⇒ SCK 完全撤去に確定（マイクも AVAudioEngine へ）。スコープ＝大。**
+- [x] **① タップ稼働中に黒くならないか（本命）** → **黒くならない**。`tap`（Core Audio プロセスタップ）稼働中は Netflix 継続再生。
+- [x] **② タップで通常音声が録れるか** → **録れる**。20.0 秒 WAV、mean -21.4 dB / max -2.7 dB（無音でない）。
+- [x] **⑦ タップの ASBD** → **48000 Hz / 2ch / Float32 / interleaved**。既存 WriterBox（48kHz 前提）と整合可。
+- [x] **タップに必要な TCC 権限**（部分）→ `tap` は**画面収録なしで動作**（audio 系権限のみ）。対して `micsck`（SCK）は「画面とシステムオーディオ収録」を要求。**⇒ タップ移行は画面収録権限が不要になる（③の主要点は確認）。** 初回プロンプトの正確な文言・種別は未記録（次回記録）。
+
+### 残タスク（本実装の実機で確認）
+
 - [ ] **App Sandbox** 下でタップ/アグリゲートデバイス作成が許可されるか。必要なエンタイトルメント。
-- [ ] **保護音声（Netflix 等）がタップで無音になるか**（②）。
-- [ ] **マイク単独 SCStream が DRM を誘発するか**（④＝スコープ確定）。
+- [ ] **保護音声（Netflix 等）がタップで無音になるか**（②の厳密判定。今回は通常音声の録音を確認したのみ）。
 - [ ] 出力デバイス切替時にタップ/アグリゲートの**再構築が要るか**（⑤）。
-- [ ] タップの **ASBD**（サンプルレート/チャンネル/インターリーブ）と WriterBox 整合。
+- [ ] マイク AVAudioEngine 化に伴う **`--mic-device` 指定**の対応（入力デバイス設定）。
+- [ ] system(タップ) と mic(AVAudioEngine) の**独立クロックによるドリフト**（§8・長時間録音）。
 
 ---
 
@@ -240,18 +250,25 @@ AudioHardwareCreateProcessTap(desc, &tapID)
 
 ## 13. 作業チェックリスト（順序）
 
-1. [ ] `native/sysrec/spike/` に最小タップ試作を作成
-2. [ ] Spike ①〜⑦ を実機で確認し、**§10 の未解決事項を埋める**
-3. [ ] **スコープ確定**（マイクも移すか / SCK 撤去か併存か）
-4. [ ] `TapCapturer` 実装（案 b: CMSampleBuffer 化して既存 WriterBox に接続）
-5. [ ] （必要なら）`MicCapturer`（AVAudioEngine）実装
-6. [ ] 停止/破棄の順序・リーク対策・共通タイムベース
-7. [ ] `--engine sck|tap` フォールバック導入
-8. [ ] entitlements 更新、`build.sh` の署名確認
-9. [ ] doctor（TCC 文言・`check-permission`）更新
-10. [ ] テストマトリクス実施（特に Netflix 非黒・長時間ドリフト・異常系）
-11. [ ] `設計書 §2` を「タップ方式」に更新、本レポートに結果を追記
+1. [x] `native/sysrec/spike/` に最小タップ試作を作成
+2. [x] Spike ①〜⑦ を実機で確認し、**§10 の未解決事項を埋める**（②③④⑦は確定・§10）
+3. [x] **スコープ確定**（→ SCK 完全撤去。§0/§5/§10）
+4. [x] `TapCapturer` 実装（案 b: CMSampleBuffer 化して既存 WriterBox に接続）
+5. [x] `MicCapturer`（AVAudioEngine）実装
+6. [x] 停止/破棄の順序・リーク対策・共通タイムベース（PTS はソース別の連番＝サンプル数基準。長時間ドリフトは 10 で要検証）
+7. [—] `--engine sck|tap` フォールバック導入 → **不採用（タップ一本で置き換え・2026-07-05 ユーザー決定）**。SCK は完全撤去。
+8. [x] entitlements（`audio-input` のまま据え置きで可）、`build.sh` の framework/署名更新（ScreenCaptureKit 撤去）
+9. [x] doctor（TCC 文言＝「マイク」へ・`check-permission`＝マイク許可へ）更新
+10. [~] **テストマトリクス（実機・一部済）**: **① Netflix 非黒＝確認済**（2026-07-05 実機・本番 sysrec）／**both 録音＋mix＝確認済**（sys mean -16.8dB・mic 録音・最終 mono m4a 生成・started/stopped/mixed 正常）。**残: 長時間ドリフト（60分）・異常系（クラッシュ→孤児 sweep 等）・`--mic-device` 指定・出力デバイス切替（⑤）**
+11. [ ] `設計書 §2` を「タップ方式」に更新
 12. [ ] `npm run build-sysrec` で本番バイナリ生成 → 配布
+
+### 2026-07-05 実装メモ（`sysrec.swift` 書き換え完了・ヘッドレス検証済／実機未）
+- `Capture` を SCK 版から **TapCapturer（Core Audio タップ）＋ MicCapturer（AVAudioEngine）** に全面差し替え。両ソースを `FormatNormalizer`（AVAudioConverter）で `--samplerate`/`--channels` に正規化 → `makeAudioSampleBuffer` で CMSampleBuffer 化 → 既存 WriterBox へ。**CLI 契約・状態機械・mix・AGC・文字起こしは不変**。
+- **ヘッドレス検証済**: swiftc ビルド green / 変換グルー（makeAudioSampleBuffer＋FormatNormalizer）の分離テストで passthrough・48k→16k+モノラル・44.1k→48k の 3 ケースとも有効 m4a 生成（正弦波保持）を確認 / TS `npm run build` green・lint 0 / E2E 33/33。
+- **実機検証済（2026-07-05・本番 sysrec）**: `--source both` 20 秒録音で system(タップ)＝mean -16.8dB / mic(エンジン)＝録音あり、`sysrec mix`→最終 mono m4a（-18.5dB 正規化）まで成功。started/stopped/mixed イベント正常。**録音中 Netflix は黒くならないことをユーザー確認済（①解決）。** ⇒ DRM 対策の目的達成。
+- **実機で残（要確認）**: 長時間ドリフト（60分）、異常系（クラッシュ→孤児 sweep）、`--mic-device` 指定、出力デバイス切替（⑤）。
+- 既知の注意: `--mic-device` は best-effort（UID→AudioDeviceID 解決失敗時は既定入力にフォールバック）。system(タップ)/mic(エンジン) は独立クロック＝長時間でドリフトの可能性（§8・要テスト）。
 
 ---
 

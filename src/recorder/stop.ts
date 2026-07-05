@@ -115,7 +115,7 @@ async function doFinalize(ctx: RecorderContext, meta: SessionMeta): Promise<Term
       event: "stop-warning",
       sessionId: meta.id,
       source: "both",
-      message: "録音データがありません（画面収録権限やデバイスを確認してください）。",
+      message: "録音データがありません（マイク権限やデバイスを確認してください）。",
     };
   }
 

@@ -437,18 +437,19 @@ function stateAndTccChecks(ctx: RecorderContext, binPath: string | null): Doctor
 }
 
 const TCC_GUIDE =
-  "「システム設定 > プライバシーとセキュリティ > 画面収録」で Obsidian を許可してください。\n" +
-  "（--source mic でも内部で ScreenCaptureKit を開くため画面収録権限が必要です）";
+  "「システム設定 > プライバシーとセキュリティ > マイク」で Obsidian を許可してください。\n" +
+  "（システム音声は Core Audio タップで取得するため画面収録権限は不要です）";
 
 /**
- * 画面収録権限（TCC）を sysrec check-permission で実検査（録音は開始しない）。
+ * マイク／録音の権限（TCC）を sysrec check-permission で実検査（録音は開始しない）。
  * バイナリが権限を持つ実体（Obsidian から spawn されれば Obsidian の権限）を反映する。
+ * タップ移行（ScreenCaptureKit 撤去）により画面収録権限は不要になった。
  */
 function tccCheck(binPath: string | null): DoctorCheck {
   if (!binPath) {
     return {
       id: "tcc",
-      label: "画面収録権限（TCC）",
+      label: "マイク録音の権限（TCC）",
       status: "info",
       detail: "バイナリ未検出のため権限を検査できません。\n" + TCC_GUIDE,
     };
@@ -457,15 +458,15 @@ function tccCheck(binPath: string | null): DoctorCheck {
   if (code === TCC_OK) {
     return {
       id: "tcc",
-      label: "画面収録権限（TCC）",
+      label: "マイク録音の権限（TCC）",
       status: "ok",
-      detail: "許可されています（システム音声を録音できます）。",
+      detail: "許可されています（録音できます）。",
     };
   }
   if (code === TCC_DENIED) {
     return {
       id: "tcc",
-      label: "画面収録権限（TCC）",
+      label: "マイク録音の権限（TCC）",
       status: "ng",
       detail: "許可されていません。初回録音時に許可ダイアログが出ます。\n" + TCC_GUIDE,
     };
@@ -473,7 +474,7 @@ function tccCheck(binPath: string | null): DoctorCheck {
   // 古いバイナリ（check-permission 非対応）や判定不能
   return {
     id: "tcc",
-    label: "画面収録権限（TCC）",
+    label: "マイク録音の権限（TCC）",
     status: "info",
     detail: "権限状態を判定できませんでした（初回録音時に許可ダイアログが出ます）。\n" + TCC_GUIDE,
   };

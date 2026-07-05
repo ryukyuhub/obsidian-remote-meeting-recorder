@@ -1,9 +1,9 @@
 #!/bin/sh
-# sysrec ビルドスクリプト（macOS / ScreenCaptureKit）
+# sysrec ビルドスクリプト（macOS / Core Audio プロセスタップ + AVAudioEngine）
 #
 #   sh build.sh            … ビルド + ad-hoc 署名 → ./sysrec
 #
-# 署名は TCC（画面収録・マイク）権限を安定させるための ad-hoc 署名。
+# 署名は TCC（マイク/オーディオ録音）権限を安定させるための ad-hoc 署名。
 set -e
 cd "$(dirname "$0")"
 
@@ -13,9 +13,9 @@ echo "[sysrec] compiling -> $OUT"
 # -swift-version 5: CLI 用途のため厳格な並行性チェックを緩める
 swiftc -O -swift-version 5 -parse-as-library sysrec.swift -o "$OUT" \
   -framework AVFoundation \
-  -framework ScreenCaptureKit \
   -framework CoreMedia \
-  -framework CoreAudio
+  -framework CoreAudio \
+  -framework AudioToolbox
 
 echo "[sysrec] codesign (ad-hoc)"
 codesign --force --sign - --entitlements sysrec.entitlements "$OUT"

@@ -1,8 +1,10 @@
-// sysrec — macOS 会議録音バイナリ（ScreenCaptureKit）
+// sysrec — macOS 会議録音バイナリ（Core Audio プロセスタップ + AVAudioEngine）
 //
 // 会議録音MCP設計書.md §3.1 / §3.1a の「録音バイナリ共通契約」を実装する。
-// システム音声（ScreenCaptureKit capturesAudio）とマイク（captureMicrophone, macOS 15+）を
-// 取得し、source に応じて .m4a(AAC) で書き出す CLI。
+// システム音声（Core Audio プロセスタップ・AudioHardwareCreateProcessTap, macOS 14.4+）と
+// マイク（AVAudioEngine）を取得し、source に応じて .m4a(AAC) で書き出す CLI。
+// ScreenCaptureKit を使わないため録音中も「画面録画中」状態にならず、DRM 保護映像
+// （Netflix 等）が黒くならない（DRM対策 CoreAudioタップ移行 実装レポート参照）。
 //
 // 使い方:
 //   録音:  sysrec --out <path> [--source both|system|mic] [--mic-device <uid>]
@@ -22,8 +24,8 @@
 // 終了コード: 0=正常 / 2=権限なし / 3=デバイスなし / 4=ディスク等 / 1=その他
 
 import AVFoundation
-import ScreenCaptureKit
-import CoreGraphics
+import CoreAudio
+import AudioToolbox
 import Darwin
 
 // ============================================================
@@ -364,17 +366,278 @@ final class WriterBox {
 }
 
 // ============================================================
-// キャプチャ本体
+// キャプチャ本体（Core Audio プロセスタップ + AVAudioEngine）
+// system=タップ / mic=AVAudioEngine。両者を目標フォーマット（--samplerate/--channels）へ
+// 正規化して WriterBox へ渡すので、下流（WriterBox/AGC/mix）は SCK 時代のまま流用できる。
 // ============================================================
 
-final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
+enum CaptureError: Error { case msg(String) }
+
+/// AVAudioPCMBuffer(Float32) を、指定 PTS 付きの CMSampleBuffer に包む。
+/// WriterBox が期待する「Float32 LPCM の CMSampleBuffer」を作る（AGC 経路も通る）。
+func makeAudioSampleBuffer(from pcm: AVAudioPCMBuffer, pts: CMTime) -> CMSampleBuffer? {
+    let frames = CMItemCount(pcm.frameLength)
+    guard frames > 0 else { return nil }
+    var asbd = pcm.format.streamDescription.pointee
+    var formatDesc: CMFormatDescription?
+    guard CMAudioFormatDescriptionCreate(
+        allocator: kCFAllocatorDefault, asbd: &asbd,
+        layoutSize: 0, layout: nil, magicCookieSize: 0, magicCookie: nil,
+        extensions: nil, formatDescriptionOut: &formatDesc) == noErr,
+        let formatDesc else { return nil }
+    let sr = asbd.mSampleRate > 0 ? asbd.mSampleRate : 48000
+    var timing = CMSampleTimingInfo(
+        duration: CMTime(value: 1, timescale: CMTimeScale(sr)),
+        presentationTimeStamp: pts, decodeTimeStamp: .invalid)
+    var sb: CMSampleBuffer?
+    guard CMSampleBufferCreate(
+        allocator: kCFAllocatorDefault, dataBuffer: nil, dataReady: false,
+        makeDataReadyCallback: nil, refcon: nil, formatDescription: formatDesc,
+        sampleCount: frames, sampleTimingEntryCount: 1, sampleTimingArray: &timing,
+        sampleSizeEntryCount: 0, sampleSizeArray: nil, sampleBufferOut: &sb) == noErr,
+        let sb else { return nil }
+    guard CMSampleBufferSetDataBufferFromAudioBufferList(
+        sb, blockBufferAllocator: kCFAllocatorDefault,
+        blockBufferMemoryAllocator: kCFAllocatorDefault,
+        flags: 0, bufferList: pcm.audioBufferList) == noErr else { return nil }
+    return sb
+}
+
+/// 入力フォーマットを目標（sampleRate/channels・Float32・interleaved）へ変換する。
+/// 目標と同一なら素通し。SCK 時代は cfg.sampleRate/channelCount で目標形式を直接得ていたので、
+/// タップ/エンジンの native 形式をここで揃えて下流の挙動を不変にする。
+final class FormatNormalizer {
+    let targetFormat: AVAudioFormat
+    private let converter: AVAudioConverter?
+    init?(from src: AVAudioFormat, sampleRate: Double, channels: AVAudioChannelCount) {
+        guard let target = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32, sampleRate: sampleRate,
+            channels: channels, interleaved: true) else { return nil }
+        targetFormat = target
+        if src.sampleRate == target.sampleRate && src.channelCount == target.channelCount {
+            converter = nil
+        } else {
+            converter = AVAudioConverter(from: src, to: target)
+        }
+    }
+    func convert(_ input: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
+        guard let converter else { return input } // 同一フォーマット＝素通し
+        let ratio = targetFormat.sampleRate / input.format.sampleRate
+        let cap = AVAudioFrameCount(Double(input.frameLength) * ratio) + 32
+        guard let out = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: cap) else { return nil }
+        var supplied = false
+        var err: NSError?
+        let status = converter.convert(to: out, error: &err) { _, outStatus in
+            if supplied { outStatus.pointee = .noDataNow; return nil }
+            supplied = true; outStatus.pointee = .haveData; return input
+        }
+        if status == .error || out.frameLength == 0 { return nil }
+        return out
+    }
+}
+
+/// 生の AudioBufferList(interleaved Float32) を AVAudioPCMBuffer にコピーする。
+/// タップ IOProc が渡すバッファはコールバック内でのみ有効なので、必ずコピーして持ち出す。
+func copyToPCMBuffer(_ abl: UnsafeMutableAudioBufferListPointer, format: AVAudioFormat,
+                     frames: AVAudioFrameCount) -> AVAudioPCMBuffer? {
+    guard frames > 0, abl.count >= 1,
+          let out = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames) else { return nil }
+    out.frameLength = frames
+    let dst = UnsafeMutableAudioBufferListPointer(out.mutableAudioBufferList)
+    guard let srcData = abl[0].mData, let dstData = dst[0].mData else { return nil }
+    let bytes = min(Int(abl[0].mDataByteSize), Int(dst[0].mDataByteSize))
+    memcpy(dstData, srcData, bytes)
+    dst[0].mDataByteSize = UInt32(bytes)
+    return out
+}
+
+/// UID からオーディオ入力デバイス ID を引く（--mic-device 用・best-effort）。
+func audioDeviceID(forUID uid: String) -> AudioDeviceID? {
+    let sys = AudioObjectID(kAudioObjectSystemObject)
+    var size = UInt32(0)
+    var addr = AudioObjectPropertyAddress(
+        mSelector: kAudioHardwarePropertyDevices,
+        mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+    guard AudioObjectGetPropertyDataSize(sys, &addr, 0, nil, &size) == noErr, size > 0 else { return nil }
+    let count = Int(size) / MemoryLayout<AudioDeviceID>.size
+    var ids = [AudioDeviceID](repeating: 0, count: count)
+    guard AudioObjectGetPropertyData(sys, &addr, 0, nil, &size, &ids) == noErr else { return nil }
+    for id in ids {
+        var uidRef: Unmanaged<CFString>?
+        var usz = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+        var uaddr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDeviceUID,
+            mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        if AudioObjectGetPropertyData(id, &uaddr, 0, nil, &usz, &uidRef) == noErr,
+           let v = uidRef?.takeRetainedValue(), (v as String) == uid {
+            return id
+        }
+    }
+    return nil
+}
+
+/// システム音声を Core Audio プロセスタップで取得（画面キャプチャなし）。onBuffer に native PCM を渡す。
+final class TapCapturer {
+    private let onBuffer: (AVAudioPCMBuffer) -> Void
+    private var tapID = AudioObjectID(kAudioObjectUnknown)
+    private var aggID = AudioObjectID(kAudioObjectUnknown)
+    private var ioProc: AudioDeviceIOProcID?
+    private var srcFormat: AVAudioFormat?
+
+    init(onBuffer: @escaping (AVAudioPCMBuffer) -> Void) { self.onBuffer = onBuffer }
+
+    func start() throws {
+        let sys = AudioObjectID(kAudioObjectSystemObject)
+        // 自プロセス除外つき・非ミュートの全体タップ（実出力はミュートしない＝ユーザは音を聞ける）
+        var pid = getpid()
+        var ownObj = AudioObjectID(kAudioObjectUnknown)
+        var oaddr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyTranslatePIDToProcessObject,
+            mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        var osz = UInt32(MemoryLayout<AudioObjectID>.size)
+        _ = AudioObjectGetPropertyData(sys, &oaddr, UInt32(MemoryLayout<pid_t>.size), &pid, &osz, &ownObj)
+        let desc = CATapDescription(stereoGlobalTapButExcludeProcesses: ownObj != 0 ? [ownObj] : [])
+        desc.name = "sysrec system tap"
+        desc.isPrivate = true
+        desc.muteBehavior = .unmuted
+
+        guard AudioHardwareCreateProcessTap(desc, &tapID) == noErr, tapID != 0 else {
+            throw CaptureError.msg("システム音声タップを作成できませんでした（オーディオ録音の権限を確認してください）。")
+        }
+        var asbd = AudioStreamBasicDescription()
+        var asz = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+        var faddr = AudioObjectPropertyAddress(
+            mSelector: kAudioTapPropertyFormat,
+            mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        guard AudioObjectGetPropertyData(tapID, &faddr, 0, nil, &asz, &asbd) == noErr,
+              let fmt = AVAudioFormat(streamDescription: &asbd) else {
+            AudioHardwareDestroyProcessTap(tapID)
+            throw CaptureError.msg("タップの音声フォーマットを取得できませんでした。")
+        }
+        srcFormat = fmt
+
+        guard let outUID = TapCapturer.defaultOutputUID() else {
+            AudioHardwareDestroyProcessTap(tapID)
+            throw CaptureError.msg("デフォルト出力デバイスを取得できませんでした。")
+        }
+        let aggDesc: [String: Any] = [
+            kAudioAggregateDeviceNameKey as String: "sysrec aggregate",
+            kAudioAggregateDeviceUIDKey as String: "sysrec-agg-\(getpid())",
+            kAudioAggregateDeviceMainSubDeviceKey as String: outUID,
+            kAudioAggregateDeviceIsPrivateKey as String: true,
+            kAudioAggregateDeviceIsStackedKey as String: false,
+            kAudioAggregateDeviceSubDeviceListKey as String: [[kAudioSubDeviceUIDKey as String: outUID]],
+            kAudioAggregateDeviceTapListKey as String: [[
+                kAudioSubTapUIDKey as String: desc.uuid.uuidString,
+                kAudioSubTapDriftCompensationKey as String: true,
+            ]],
+        ]
+        guard AudioHardwareCreateAggregateDevice(aggDesc as CFDictionary, &aggID) == noErr, aggID != 0 else {
+            AudioHardwareDestroyProcessTap(tapID)
+            throw CaptureError.msg("集約デバイスを作成できませんでした。")
+        }
+
+        let block: AudioDeviceIOBlock = { [weak self] _, inInputData, _, _, _ in
+            guard let self, let fmt = self.srcFormat else { return }
+            let abl = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inInputData))
+            guard abl.count >= 1, abl[0].mData != nil else { return }
+            let ch = max(1, Int(abl[0].mNumberChannels))
+            let frames = AVAudioFrameCount(Int(abl[0].mDataByteSize) / (MemoryLayout<Float>.size * ch))
+            guard frames > 0, let pcm = copyToPCMBuffer(abl, format: fmt, frames: frames) else { return }
+            self.onBuffer(pcm)
+        }
+        guard AudioDeviceCreateIOProcIDWithBlock(&ioProc, aggID, nil, block) == noErr, let proc = ioProc else {
+            AudioHardwareDestroyAggregateDevice(aggID); AudioHardwareDestroyProcessTap(tapID)
+            throw CaptureError.msg("IOProc を作成できませんでした。")
+        }
+        guard AudioDeviceStart(aggID, proc) == noErr else {
+            AudioDeviceDestroyIOProcID(aggID, proc)
+            AudioHardwareDestroyAggregateDevice(aggID); AudioHardwareDestroyProcessTap(tapID)
+            throw CaptureError.msg("システム音声タップを開始できませんでした。")
+        }
+    }
+
+    /// 停止/破棄は順序厳守（Stop → DestroyIOProcID → DestroyAggregate → DestroyProcessTap）。
+    func stop() {
+        if let proc = ioProc {
+            AudioDeviceStop(aggID, proc)
+            AudioDeviceDestroyIOProcID(aggID, proc)
+            ioProc = nil
+        }
+        if aggID != 0 { AudioHardwareDestroyAggregateDevice(aggID); aggID = 0 }
+        if tapID != 0 { AudioHardwareDestroyProcessTap(tapID); tapID = 0 }
+    }
+
+    private static func defaultOutputUID() -> String? {
+        let sys = AudioObjectID(kAudioObjectSystemObject)
+        var dev = AudioObjectID(kAudioObjectUnknown)
+        var sz = UInt32(MemoryLayout<AudioObjectID>.size)
+        var a1 = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        guard AudioObjectGetPropertyData(sys, &a1, 0, nil, &sz, &dev) == noErr, dev != 0 else { return nil }
+        var uid: Unmanaged<CFString>?
+        var usz = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+        var a2 = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDeviceUID,
+            mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        guard AudioObjectGetPropertyData(dev, &a2, 0, nil, &usz, &uid) == noErr,
+              let v = uid?.takeRetainedValue() else { return nil }
+        return v as String
+    }
+}
+
+/// マイクを AVAudioEngine で取得。onBuffer に native PCM を渡す。
+final class MicCapturer {
+    private let engine = AVAudioEngine()
+    private let onBuffer: (AVAudioPCMBuffer) -> Void
+    private var installed = false
+    init(onBuffer: @escaping (AVAudioPCMBuffer) -> Void) { self.onBuffer = onBuffer }
+
+    func start(micDevice: String?) throws {
+        let input = engine.inputNode
+        // 特定マイク指定（best-effort）。解決できなければ既定入力にフォールバック。
+        if let uid = micDevice, let devID = audioDeviceID(forUID: uid), let unit = input.audioUnit {
+            var dev = devID
+            let st = AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice,
+                                          kAudioUnitScope_Global, 0, &dev,
+                                          UInt32(MemoryLayout<AudioDeviceID>.size))
+            if st != noErr { logErr("マイクデバイス指定に失敗（既定入力を使用）: \(st)") }
+        }
+        let format = input.outputFormat(forBus: 0)
+        guard format.channelCount > 0, format.sampleRate > 0 else {
+            throw CaptureError.msg("マイク入力フォーマットが不正です（入力デバイスを確認してください）。")
+        }
+        input.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buf, _ in
+            self?.onBuffer(buf)
+        }
+        installed = true
+        engine.prepare()
+        do { try engine.start() } catch {
+            input.removeTap(onBus: 0); installed = false
+            throw CaptureError.msg("マイクを開始できませんでした: \(error.localizedDescription)")
+        }
+    }
+
+    func stop() {
+        if installed { engine.inputNode.removeTap(onBus: 0); installed = false }
+        engine.stop()
+    }
+}
+
+final class Capture {
     private let opt: Options
     private let emitter: Emitter
-    private let q = DispatchQueue(label: "sysrec.capture")
-    private var stream: SCStream?
     private var sysBox: WriterBox?
     private var micBox: WriterBox?
+    private var tap: TapCapturer?
+    private var mic: MicCapturer?
+    private var sysNorm: FormatNormalizer?
+    private var micNorm: FormatNormalizer?
+    private var sysFrames: Int64 = 0
+    private var micFrames: Int64 = 0
     private var stopping = false
+    private let stopLock = NSLock()
 
     init(_ opt: Options, _ emitter: Emitter) {
         self.opt = opt; self.emitter = emitter
@@ -388,92 +651,70 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
         } else { // mic
             micBox = WriterBox(path: opt.out, label: "microphone", agc: opt.agc)
         }
-        super.init()
     }
 
     func start() {
-        SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: false) { [weak self] content, error in
-            guard let self else { return }
-            if error != nil || content == nil {
-                // 権限なし（画面収録未許可）はここで弾かれる
-                die(2, "画面収録の権限がありません。システム設定 > プライバシーとセキュリティ > 画面収録 を許可してください。")
-            }
-            guard let display = content!.displays.first else {
-                die(3, "対象ディスプレイが見つかりません。")
-            }
-            self.configureAndStart(display: display)
-        }
-    }
-
-    private func configureAndStart(display: SCDisplay) {
-        let filter = SCContentFilter(display: display, excludingWindows: [])
-        let cfg = SCStreamConfiguration()
-        cfg.capturesAudio = (opt.source != "mic")
-        cfg.captureMicrophone = (opt.source != "system")
-        if let uid = opt.micDevice { cfg.microphoneCaptureDeviceID = uid }
-        cfg.sampleRate = opt.sampleRate
-        cfg.channelCount = opt.channels
-        // 映像は不要だが SCK は display 指定が必須。最小サイズ・低fps にして破棄する。
-        cfg.width = 100; cfg.height = 100
-        cfg.minimumFrameInterval = CMTime(value: 1, timescale: 1)
-        cfg.excludesCurrentProcessAudio = true
-
-        let stream = SCStream(filter: filter, configuration: cfg, delegate: self)
         do {
-            if cfg.capturesAudio {
-                try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: q)
+            if opt.source != "mic" {
+                let t = TapCapturer { [weak self] pcm in self?.handleSystem(pcm) }
+                try t.start()
+                tap = t
             }
-            if cfg.captureMicrophone {
-                try stream.addStreamOutput(self, type: .microphone, sampleHandlerQueue: q)
+            if opt.source != "system" {
+                let m = MicCapturer { [weak self] pcm in self?.handleMic(pcm) }
+                try m.start(micDevice: opt.micDevice)
+                mic = m
             }
+        } catch CaptureError.msg(let m) {
+            die(2, m)
         } catch {
-            die(1, "ストリーム出力の追加に失敗: \(error)")
+            die(1, "録音を開始できませんでした: \(error.localizedDescription)")
         }
-        self.stream = stream
-        stream.startCapture { [weak self] err in
-            guard let self else { return }
-            if let err = err as NSError? {
-                // TCC 拒否は SCStreamErrorDomain のことが多い
-                if err.domain == SCStreamErrorDomain { die(2, "録音の権限がありません: \(err.localizedDescription)") }
-                die(1, "startCapture 失敗: \(err.localizedDescription)")
-            }
-            self.emitter.emit([
-                "event": "started",
-                "source": self.opt.source,
-                "ts": ISO.string(from: Date()),
-                "pid": Int(getpid()),
-            ])
+        emitter.emit([
+            "event": "started",
+            "source": opt.source,
+            "ts": ISO.string(from: Date()),
+            "pid": Int(getpid()),
+        ])
+    }
+
+    // system: タップ由来の PCM を目標フォーマットへ正規化し、連番 PTS で sysBox へ。
+    private func handleSystem(_ pcm: AVAudioPCMBuffer) {
+        if stopping { return }
+        if sysNorm == nil {
+            sysNorm = FormatNormalizer(from: pcm.format, sampleRate: Double(opt.sampleRate),
+                                       channels: AVAudioChannelCount(max(1, opt.channels)))
+        }
+        guard let out = sysNorm?.convert(pcm), out.frameLength > 0 else { return }
+        let pts = CMTime(value: sysFrames, timescale: CMTimeScale(opt.sampleRate))
+        if let sb = makeAudioSampleBuffer(from: out, pts: pts) {
+            sysBox?.append(sb); sysFrames += Int64(out.frameLength)
         }
     }
 
-    // SCStreamOutput
-    func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
-                of type: SCStreamOutputType) {
-        guard !stopping, CMSampleBufferDataIsReady(sampleBuffer) else { return }
-        switch type {
-        case .audio: sysBox?.append(sampleBuffer)
-        case .microphone: micBox?.append(sampleBuffer)
-        default: break // .screen（映像）は破棄
+    // mic: エンジン由来の PCM を同様に micBox へ。
+    private func handleMic(_ pcm: AVAudioPCMBuffer) {
+        if stopping { return }
+        if micNorm == nil {
+            micNorm = FormatNormalizer(from: pcm.format, sampleRate: Double(opt.sampleRate),
+                                       channels: AVAudioChannelCount(max(1, opt.channels)))
         }
-    }
-
-    // SCStreamDelegate
-    func stream(_ stream: SCStream, didStopWithError error: Error) {
-        logErr("stream stopped with error: \(error)")
-        finishAndExit(code: 1)
+        guard let out = micNorm?.convert(pcm), out.frameLength > 0 else { return }
+        let pts = CMTime(value: micFrames, timescale: CMTimeScale(opt.sampleRate))
+        if let sb = makeAudioSampleBuffer(from: out, pts: pts) {
+            micBox?.append(sb); micFrames += Int64(out.frameLength)
+        }
     }
 
     func stop() {
-        q.async { [weak self] in
-            guard let self, !self.stopping else { return }
-            self.stopping = true
-            if let s = self.stream {
-                s.stopCapture { _ in self.finishAndExit(code: 0) }
-            } else {
-                // まだキャプチャ開始前に停止が来た場合（何も録れていない）
-                self.finishAndExit(code: 0)
-            }
-        }
+        stopLock.lock()
+        if stopping { stopLock.unlock(); return }
+        stopping = true
+        stopLock.unlock()
+        // まずコールバックを止めてから finalize（キャプチャ停止は同期的）。
+        tap?.stop()
+        mic?.stop()
+        finishAndExit(code: 0)
     }
 
     private func finishAndExit(code: Int32) {
@@ -676,10 +917,11 @@ struct SysRec {
     static func main() {
         let argv = Array(CommandLine.arguments.dropFirst())
 
-        // 権限プリフライト（録音を開始せず画面収録許可の有無だけ返す。doctor 用）
+        // 権限プリフライト（録音を開始せずマイク/オーディオ録音許可の有無だけ返す。doctor 用）
+        // タップ移行により画面収録権限は不要。マイク（AVAudioEngine）の許可を確認する。
         // 終了コード: 0=許可あり / 2=許可なし
         if argv.first == "check-permission" {
-            exit(CGPreflightScreenCaptureAccess() ? 0 : 2)
+            exit(AVCaptureDevice.authorizationStatus(for: .audio) == .authorized ? 0 : 2)
         }
 
         // 入力（マイク）デバイス一覧を JSON で出力（[{uid,name}]・doctor/UI 用）。

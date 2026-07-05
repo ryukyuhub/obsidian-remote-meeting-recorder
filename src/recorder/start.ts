@@ -74,7 +74,7 @@ export async function startRecording(
   if (polled == null || !isAlive(polled)) {
     cleanupFailed(sp);
     throw new StartError(
-      "録音プロセスの起動を確認できませんでした（画面収録権限やデバイスを確認してください）。",
+      "録音プロセスの起動を確認できませんでした（マイク権限やデバイスを確認してください）。",
       tailFile(sp.log, 20)
     );
   }

@@ -13,6 +13,9 @@ build/
 native/sysrec/sysrec
 native/sysrec/*.o
 native/sysrec/build/
+# DRM対策 Spike のビルド成果物（ソース tap.swift/micsck.swift のみ追跡）
+native/sysrec/spike/tap
+native/sysrec/spike/micsck
 *.dSYM/
 
 # whisper.cpp のビルド成果物・クローン・モデル（大容量）
