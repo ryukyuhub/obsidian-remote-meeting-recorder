@@ -4,9 +4,9 @@ import type { SessionMeta, TerminalEvent } from "../types";
 import { sessionPaths } from "../state/paths";
 import { readSessionMeta, finalizeCleanup } from "../state/sessionStore";
 import { isAlive } from "./spawn";
-import { runMix, rescueRename } from "./mix";
+import { mixOrRescue, savedTerminalEvent } from "./mix";
 import { delay } from "../util/delay";
-import { existsWithSize, intermediatePaths, safeUnlink, statBytes } from "../util/fsx";
+import { existsWithSize, safeUnlink } from "../util/fsx";
 
 /** status ファイルに stopped イベントが現れたか（キーは sortedKeys でこの並び）。 */
 export function statusHasStopped(statusPath: string): boolean {
@@ -78,68 +78,42 @@ async function doFinalize(ctx: RecorderContext, meta: SessionMeta): Promise<Term
   const durationSec = parseDurationSec(sp.status);
 
   if (meta.source === "both") {
-    const { sys, mic } = intermediatePaths(meta.out);
-    const sysE = existsWithSize(sys);
-    const micE = existsWithSize(mic);
-
-    if (sysE && micE) {
-      const ok = await runMix(ctx, meta.bin, sys, mic, meta.out, meta.agc);
-      if (ok) {
-        safeUnlink(sys);
-        safeUnlink(mic);
+    const outcome = await mixOrRescue(ctx, meta.bin, meta.out, meta.agc, meta.id);
+    switch (outcome.kind) {
+      case "mixed":
+      case "rescued":
+        return savedTerminalEvent("stopped", meta.id, meta.source, meta.out, durationSec);
+      case "mix-failed":
+        // 中間+json+log を温存 / pid+status のみ rm → stop-warning（remix で復旧可）
+        safeUnlink(sp.pid);
+        safeUnlink(sp.status);
+        return {
+          event: "stop-warning",
+          sessionId: meta.id,
+          source: "both",
+          message: "mix に失敗しました。remix で復旧できます（中間ファイルは保持）。",
+          parts: { system: outcome.sys, mic: outcome.mic },
+        };
+      case "no-data":
         finalizeCleanup(ctx.paths, meta.id);
-        return stopped(meta, meta.out, durationSec);
-      }
-      // mix 失敗 → 中間+json+log を温存 / pid+status のみ rm → stop-warning（remix で復旧可）
-      safeUnlink(sp.pid);
-      safeUnlink(sp.status);
-      return {
-        event: "stop-warning",
-        sessionId: meta.id,
-        source: "both",
-        message: "mix に失敗しました。remix で復旧できます（中間ファイルは保持）。",
-        parts: { system: sys, mic: mic },
-      };
+        return {
+          event: "stop-warning",
+          sessionId: meta.id,
+          source: "both",
+          message: "録音データがありません（マイク権限やデバイスを確認してください）。",
+        };
     }
-
-    if (sysE || micE) {
-      // 片方だけ → rename で救う
-      rescueRename(sys, mic, meta.out);
-      finalizeCleanup(ctx.paths, meta.id);
-      return stopped(meta, meta.out, durationSec);
-    }
-
-    // 両方無し = 録れていない
-    finalizeCleanup(ctx.paths, meta.id);
-    return {
-      event: "stop-warning",
-      sessionId: meta.id,
-      source: "both",
-      message: "録音データがありません（マイク権限やデバイスを確認してください）。",
-    };
   }
 
   // single
-  if (existsWithSize(meta.out)) {
-    finalizeCleanup(ctx.paths, meta.id);
-    return stopped(meta, meta.out, durationSec);
-  }
   finalizeCleanup(ctx.paths, meta.id);
+  if (existsWithSize(meta.out)) {
+    return savedTerminalEvent("stopped", meta.id, meta.source, meta.out, durationSec);
+  }
   return {
     event: "stop-warning",
     sessionId: meta.id,
     source: meta.source,
     message: "録音ファイルが生成されませんでした。",
-  };
-}
-
-function stopped(meta: SessionMeta, out: string, durationSec?: number): TerminalEvent {
-  return {
-    event: "stopped",
-    sessionId: meta.id,
-    source: meta.source,
-    path: out,
-    bytes: statBytes(out),
-    durationSec,
   };
 }

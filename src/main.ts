@@ -10,15 +10,15 @@ import { startRecording, StartError, type StartResult } from "./recorder/start";
 import { startWebRecording } from "./recorder/startWeb";
 import type { WebRecorder } from "./recorder/webCapture";
 import { stopRecording } from "./recorder/stop";
+import { stopWebRecording } from "./recorder/stopWeb";
 import { remix } from "./recorder/mix";
 import { restoreInProgressSessions } from "./recorder/restore";
 import { SessionWatcher } from "./recorder/watch";
 import { insertEmbed, computeVaultRelative } from "./ui/embed";
 import { listMicDevices, type MicDevice } from "./recorder/devices";
 import { linkToDailyNote } from "./ui/dailyNote";
-import { rotateLogs, readSessionMeta, finalizeCleanup } from "./state/sessionStore";
+import { rotateLogs, readSessionMeta } from "./state/sessionStore";
 import { sessionPaths } from "./state/paths";
-import { statBytes } from "./util/fsx";
 import { WebAudioTap } from "./audio/webAudioTap";
 import { ControlWindowManager } from "./ui/controlWindow";
 import { runTranscription } from "./transcribe/runTranscription";
@@ -35,6 +35,17 @@ export interface ActiveRecordingInfo {
   agc: "on" | "off";
   startedAt: number;
   label?: string;
+}
+
+/** セッションメタから前面録音情報を組み立てる（起動時・復元時で共通）。 */
+function toActiveRecordingInfo(meta: SessionMeta): ActiveRecordingInfo {
+  return {
+    sessionId: meta.id,
+    source: meta.source,
+    agc: meta.agc,
+    startedAt: meta.startedAt,
+    label: meta.label,
+  };
 }
 
 export interface StartFromViewInput {
@@ -265,13 +276,7 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
   ): void {
     this.embedTargets.set(result.sessionId, startFile);
     const meta = result.meta; // 永続化された正の meta（startedAt 一貫）
-    this.activeRecording = {
-      sessionId: meta.id,
-      source: meta.source,
-      agc: meta.agc,
-      startedAt: meta.startedAt,
-      label: meta.label,
-    };
+    this.activeRecording = toActiveRecordingInfo(meta);
     this.startWatcher(meta);
     // Windows は WebRecorder 自身がマイクを取得済みで表示用レベルも出せるため、別タップを開かない
     // （同一マイクの二重 getUserMedia を避ける）。macOS は従来どおり表示専用タップを使う。
@@ -360,33 +365,11 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
     this.handleTerminal(ev, id);
   }
 
-  /** Windows(win32) セッションの停止・finalize。WebRecorder を止めてファイルサイズで成否判定。冪等。 */
-  private async stopWebSession(id: string): Promise<TerminalEvent> {
+  /** Windows(win32) セッションの停止。WebRecorder を Map から外し、finalize は stopWeb.ts に委譲。冪等。 */
+  private stopWebSession(id: string): Promise<TerminalEvent> {
     const rec = this.webRecorders.get(id);
     this.webRecorders.delete(id);
-    const ctx = this.buildContext();
-    const meta = readSessionMeta(sessionPaths(ctx.paths, id).json);
-    if (rec) {
-      try {
-        await rec.stop();
-      } catch {
-        // 停止時の例外は握る（ファイルが残っていれば救う）
-      }
-    }
-    const out = meta?.out;
-    const bytes = out ? statBytes(out) : 0;
-    const durationSec = meta ? Math.round((Date.now() - meta.startedAt) / 1000) : undefined;
-    finalizeCleanup(ctx.paths, id); // json/pid/status を後始末（音声ファイル out は残す）
-    if (out && bytes > 0) {
-      return { event: "stopped", sessionId: id, source: meta?.source, path: out, bytes, durationSec };
-    }
-    return {
-      event: "stop-warning",
-      sessionId: id,
-      source: meta?.source,
-      message:
-        "録音データがありませんでした（マイクの許可、またはシステム音声の共有を確認してください）。",
-    };
+    return stopWebRecording(this.buildContext(), id, rec);
   }
 
   /** WebRecorder が予期せず終了（トラック切断・録音エラー）したときの合流点。明示停止と冪等。 */
@@ -555,13 +538,7 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
 
     for (const meta of result.active) {
       if (!this.activeRecording) {
-        this.activeRecording = {
-          sessionId: meta.id,
-          source: meta.source,
-          agc: meta.agc,
-          startedAt: meta.startedAt,
-          label: meta.label,
-        };
+        this.activeRecording = toActiveRecordingInfo(meta);
       }
       this.startWatcher(meta);
     }

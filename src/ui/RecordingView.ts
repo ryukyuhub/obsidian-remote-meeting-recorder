@@ -296,15 +296,34 @@ export class RecordingView extends ItemView {
     select.addEventListener("change", () => (this.vMicDevice = select.value));
   }
 
-  private buildMonitorRow(panel: HTMLElement): void {
-    const control = this.addRow(panel, "Monitor");
+  /** ラベル付きチェックボックス行の共通生成（Monitor / Auto gain）。 */
+  private buildCheckboxRow(
+    panel: HTMLElement,
+    label: string,
+    opts: {
+      checked: boolean;
+      disabled?: boolean;
+      hint?: string;
+      onChange: (checked: boolean) => void;
+    }
+  ): void {
+    const control = this.addRow(panel, label);
     const cb = control.createEl("input", { attr: { type: "checkbox" } });
-    cb.checked = this.vMonitor;
-    cb.addEventListener("change", () => {
-      this.vMonitor = cb.checked;
-      this.plugin.setMonitor(cb.checked); // 録音中でも表示専用タップに即反映
+    cb.checked = opts.checked;
+    if (opts.disabled) cb.disabled = true;
+    cb.addEventListener("change", () => opts.onChange(cb.checked));
+    if (opts.hint) control.createSpan({ cls: "rmr-hint", text: opts.hint });
+  }
+
+  private buildMonitorRow(panel: HTMLElement): void {
+    this.buildCheckboxRow(panel, "Monitor", {
+      checked: this.vMonitor,
+      hint: "入力を試聴（ヘッドホン推奨）",
+      onChange: (checked) => {
+        this.vMonitor = checked;
+        this.plugin.setMonitor(checked); // 録音中でも表示専用タップに即反映
+      },
     });
-    control.createSpan({ cls: "rmr-hint", text: "入力を試聴（ヘッドホン推奨）" });
   }
 
   private buildStaticRow(panel: HTMLElement, label: string, value: string): void {
@@ -312,12 +331,12 @@ export class RecordingView extends ItemView {
   }
 
   private buildAgcRow(panel: HTMLElement, locked: boolean): void {
-    const control = this.addRow(panel, "Auto gain");
     const active = this.plugin.activeRecording;
-    const cb = control.createEl("input", { attr: { type: "checkbox" } });
-    cb.checked = active ? active.agc === "on" : this.vAgc;
-    cb.disabled = locked;
-    cb.addEventListener("change", () => (this.vAgc = cb.checked));
+    this.buildCheckboxRow(panel, "Auto gain", {
+      checked: active ? active.agc === "on" : this.vAgc,
+      disabled: locked,
+      onChange: (checked) => (this.vAgc = checked),
+    });
   }
 
   // ================================================================

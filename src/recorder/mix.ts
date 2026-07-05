@@ -71,18 +71,58 @@ export function rescueRename(sys: string, mic: string, out: string): boolean {
   return false;
 }
 
-/** 成功した最終ファイルから終端イベントを組み立てる。 */
-function terminalStopped(
+/** 成功した最終ファイルから終端イベント（stopped / remixed）を組み立てる（stop/remix/web 共通）。 */
+export function savedTerminalEvent(
   event: "stopped" | "remixed",
   sessionId: string,
+  source: RecorderSource | undefined,
   out: string,
-  source: RecorderSource
+  durationSec?: number
 ): TerminalEvent {
-  return { event, sessionId, path: out, bytes: statBytes(out), source };
+  return { event, sessionId, source, path: out, bytes: statBytes(out), durationSec };
+}
+
+/** both の中間ファイルを mix もしくは rescue して最終ファイルへ確定した結果。 */
+export type MixOutcome =
+  | { kind: "mixed" } // 両中間あり→mix 成功。中間削除・cleanup 済み
+  | { kind: "rescued" } // 片方のみ→rename 救済。cleanup 済み
+  | { kind: "mix-failed"; sys: string; mic: string } // 両中間あり→mix 失敗。中間は温存（cleanup せず）
+  | { kind: "no-data" }; // 中間なし（cleanup は呼び出し側判断）
+
+/**
+ * both の最終確定（stop 時・remix 時で共通）。中間 2 つ→mix、片方→rescue-rename。
+ * 成功時のみ中間削除＋ finalizeCleanup まで行い、失敗/データ無しは呼び出し側にイベント生成を委ねる。
+ */
+export async function mixOrRescue(
+  ctx: RecorderContext,
+  bin: string,
+  out: string,
+  agc: "on" | "off",
+  id: string
+): Promise<MixOutcome> {
+  const { sys, mic } = intermediatePaths(out);
+  const sysE = existsWithSize(sys);
+  const micE = existsWithSize(mic);
+
+  if (sysE && micE) {
+    const ok = await runMix(ctx, bin, sys, mic, out, agc);
+    if (!ok) return { kind: "mix-failed", sys, mic };
+    safeUnlink(sys);
+    safeUnlink(mic);
+    finalizeCleanup(ctx.paths, id);
+    return { kind: "mixed" };
+  }
+  if (sysE || micE) {
+    rescueRename(sys, mic, out);
+    finalizeCleanup(ctx.paths, id);
+    return { kind: "rescued" };
+  }
+  return { kind: "no-data" };
 }
 
 export interface RemixOptions {
   sessionId?: string;
+  /** 出力パスを直接指定（未指定なら sessionId のメタから解決）。将来の UI 向け予約。 */
   outPath?: string;
   agc?: "on" | "off";
 }
@@ -117,35 +157,23 @@ export async function remix(ctx: RecorderContext, opts: RemixOptions): Promise<T
     return { event: "remix-error", sessionId: id, message: "sysrec バイナリが見つかりません" };
   }
 
-  const { sys, mic } = intermediatePaths(out);
-  const sysE = existsWithSize(sys);
-  const micE = existsWithSize(mic);
-
-  if (sysE && micE) {
-    const ok = await runMix(ctx, bin, sys, mic, out, agc);
-    if (ok) {
-      safeUnlink(sys);
-      safeUnlink(mic);
-      finalizeCleanup(ctx.paths, id);
-      return terminalStopped("remixed", id, out, source);
-    }
-    return {
-      event: "remix-error",
-      sessionId: id,
-      message: "mix に失敗しました（中間ファイルは保持しています）",
-      parts: { system: sys, mic: mic },
-    };
+  const outcome = await mixOrRescue(ctx, bin, out, agc, id);
+  switch (outcome.kind) {
+    case "mixed":
+    case "rescued":
+      return savedTerminalEvent("remixed", id, source, out);
+    case "mix-failed":
+      return {
+        event: "remix-error",
+        sessionId: id,
+        message: "mix に失敗しました（中間ファイルは保持しています）",
+        parts: { system: outcome.sys, mic: outcome.mic },
+      };
+    case "no-data":
+      return {
+        event: "remix-error",
+        sessionId: id,
+        message: "中間ファイルがありません（復旧できません）",
+      };
   }
-
-  if (sysE || micE) {
-    rescueRename(sys, mic, out);
-    finalizeCleanup(ctx.paths, id);
-    return terminalStopped("remixed", id, out, source);
-  }
-
-  return {
-    event: "remix-error",
-    sessionId: id,
-    message: "中間ファイルがありません（復旧できません）",
-  };
 }
