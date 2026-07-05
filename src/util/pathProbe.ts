@@ -7,7 +7,7 @@ import * as path from "path";
  * GUI アプリ（Obsidian）の process.env.PATH には含まれないことが多い、
  * Homebrew / MacPorts の標準 bin ディレクトリ。PATH 検索時に補完する。
  */
-export const EXTRA_BIN_DIRS = ["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin"];
+const EXTRA_BIN_DIRS = ["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin"];
 
 /** 実行可能ファイルか（X_OK）。 */
 export function isExecutable(p: string): boolean {
@@ -29,7 +29,7 @@ export function isFile(p: string): boolean {
 }
 
 /** PATH 検索対象ディレクトリ（環境の PATH ＋ Homebrew 等の補完・重複排除）。 */
-export function pathSearchDirs(): string[] {
+function pathSearchDirs(): string[] {
   const fromEnv = (process.env.PATH ?? "").split(path.delimiter).filter(Boolean);
   const seen = new Set(fromEnv);
   return [...fromEnv, ...EXTRA_BIN_DIRS.filter((d) => !seen.has(d))];

@@ -227,10 +227,6 @@ export class WebRecorder {
     return sum / this.analyserData.length / 255;
   }
 
-  get isStarted(): boolean {
-    return this.started;
-  }
-
   // --- 内部 ---------------------------------------------------------------
 
   /** チャンクを到着順にディスクへ書く（arrayBuffer() の await でも順序が乱れないよう直列化）。 */

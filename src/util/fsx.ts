@@ -40,7 +40,7 @@ export function existsWithSize(p: string): boolean {
 }
 
 /** 拡張子を除いたパス（Swift の deletingPathExtension 相当）。 */
-export function stripExt(p: string): string {
+function stripExt(p: string): string {
   const ext = path.extname(p);
   return ext ? p.slice(0, p.length - ext.length) : p;
 }

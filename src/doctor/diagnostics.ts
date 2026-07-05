@@ -199,7 +199,7 @@ export function runDoctor(ctx: RecorderContext): DoctorCheck[] {
   // 7. 状態ディレクトリ / 8. TCC（実バイナリで権限プリフライト）
   checks.push(...stateAndTccChecks(ctx, binPath));
 
-  // 9. 文字起こし（backend 別・Phase 6）
+  // 9. 文字起こし（同梱 whisper.cpp・Phase 6）
   checks.push(...transcribeChecks(ctx));
 
   return checks;

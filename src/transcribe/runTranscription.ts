@@ -52,7 +52,7 @@ export async function runTranscription(
     });
 
     if (result == null) {
-      return; // エラーは各 backend 内で Notice 済み
+      return; // エラーは transcribeViaWhisperCpp 内で Notice 済み
     }
     if (!result.text.trim()) {
       new Notice("文字起こし結果が空でした（無音の可能性）。");

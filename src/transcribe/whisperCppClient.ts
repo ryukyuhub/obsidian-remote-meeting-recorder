@@ -9,6 +9,9 @@ export interface TranscribeOptions {
   onProgress?: (percent: number) => void;
 }
 
+// 文字起こし全体のタイムアウト（長尺音声＋CPU 推論を見込んで 1 時間）。
+const TRANSCRIBE_TIMEOUT_MS = 3_600_000;
+
 /**
  * whisper.cpp CLI で 16kHz mono WAV を文字起こしし、プレーンテキストを返す。
  * -nt でタイムスタンプ無し、-otxt/-of で <outBase>.txt に出力し読み取る。
@@ -94,7 +97,7 @@ function runWhisper(
         /* noop */
       }
       reject(new Error("文字起こしがタイムアウトしました（1時間）。"));
-    }, 3_600_000);
+    }, TRANSCRIBE_TIMEOUT_MS);
 
     child.on("error", (e) => {
       window.clearTimeout(timer);

@@ -257,23 +257,18 @@ export class RMRSettingTab extends PluginSettingTab {
       (v) => (s.transcribeOnStop = v)
     );
 
-    new Setting(containerEl)
-      .setName("Whisper モデル")
-      .setDesc(
-        "精度と速度のトレードオフ。CPU のみで遅い場合は small / base が速い。" +
-          "変更したら「診断（doctor）」でモデルを取得してください。"
-      )
-      .addDropdown((d) =>
-        d
-          .addOption("large-v3-turbo-q5_0", "large-v3-turbo（高精度・やや重い）")
-          .addOption("small", "small（速い・バランス）")
-          .addOption("base", "base（最速・軽量）")
-          .setValue(this.plugin.settings.whisperCppModel || "large-v3-turbo-q5_0")
-          .onChange(async (v) => {
-            this.plugin.settings.whisperCppModel = v;
-            await this.plugin.saveSettings();
-          })
-      );
+    this.bindDropdown(
+      "Whisper モデル",
+      "精度と速度のトレードオフ。CPU のみで遅い場合は small / base が速い。" +
+        "変更したら「診断（doctor）」でモデルを取得してください。",
+      [
+        ["large-v3-turbo-q5_0", "large-v3-turbo（高精度・やや重い）"],
+        ["small", "small（速い・バランス）"],
+        ["base", "base（最速・軽量）"],
+      ],
+      () => s.whisperCppModel || "large-v3-turbo-q5_0",
+      (v) => (s.whisperCppModel = v)
+    );
 
     const whisperNote = containerEl.createEl("p", { cls: "rmr-settings-note" });
     whisperNote.setText(
