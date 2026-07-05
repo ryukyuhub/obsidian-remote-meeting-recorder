@@ -9,7 +9,7 @@
 //                 [--samplerate 48000] [--channels 2] [--agc on|off]
 //                 [--status-file <path>] [--pidfile <path>]
 //   ミックス: sysrec mix --in <a.m4a> --in <b.m4a> --out <out.m4a>
-//             [--agc on|off] [--normalize on|off] [--channels 1|2]
+//             [--agc on|off] [--normalize on|off] [--channels 1|2] [--samplerate 48000]
 //             （both の 2 ファイルを 1 本へ。ffmpeg 非依存の AVFoundation 実装。
 //               --channels 1 で L/R 平均のモノラル出力）
 //
@@ -220,6 +220,16 @@ func applyLookaheadLimiter(_ buf: AVAudioPCMBuffer, ceiling: Float, sampleRate: 
 // 書き出し（1 ソース = 1 AVAssetWriter）
 // ============================================================
 
+/// サンプルレートに比例して AAC ビットレート(bps)を決める。
+/// 48000Hz で base、下げるほど小さくする（帯域が狭いので低ビットレートで十分）。下限 32kbps。
+/// M4A(AAC) のファイルサイズはビットレートで決まるため、これでサンプルレートを下げると
+/// ファイルサイズも実際に小さくなる（既定 48000Hz では従来どおりの値を保つ）。
+func scaledBitrate(_ base: Int, sampleRate: Int) -> Int {
+    let sr = sampleRate > 0 ? sampleRate : 48000
+    let v = Int((Double(base) * Double(sr) / 48000.0).rounded())
+    return max(32000, v)
+}
+
 /// 1 つの音声ソース（system もしくは microphone）を AAC .m4a へ書き出す箱。
 /// 最初のサンプルが届いた時点で実フォーマット(ASBD)からライタを遅延生成する。
 /// agc=true なら Float32 PCM チャンクに AGC+リミッターを適用してから書き出す
@@ -314,11 +324,12 @@ final class WriterBox {
               let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(fmt)?.pointee else {
             failed = true; return
         }
+        let srOut = asbd.mSampleRate > 0 ? asbd.mSampleRate : 48000
         let settings: [String: Any] = [
             AVFormatIDKey: kAudioFormatMPEG4AAC,
-            AVSampleRateKey: asbd.mSampleRate > 0 ? asbd.mSampleRate : 48000,
+            AVSampleRateKey: srOut,
             AVNumberOfChannelsKey: Int(asbd.mChannelsPerFrame) > 0 ? Int(asbd.mChannelsPerFrame) : 2,
-            AVEncoderBitRateKey: 128000,
+            AVEncoderBitRateKey: scaledBitrate(128000, sampleRate: Int(srOut)),
         ]
         do {
             let w = try AVAssetWriter(outputURL: url, fileType: .m4a)
@@ -493,6 +504,7 @@ func runMix(_ argv: [String]) -> Never {
     var agcOn = true        // トラック別の自動レベル調整
     var normalizeOn = true  // 最終ラウドネス正規化（リミッターは常時有効）
     var outChannels = 2     // 出力チャンネル数（1=モノラル / 2=ステレオ。既定は 2）
+    var mixSampleRate = 48000 // 出力ビットレート算出用（設定サンプルレート。出力自体は 48000Hz 固定）
     var i = 0
     while i < argv.count {
         switch argv[i] {
@@ -501,6 +513,7 @@ func runMix(_ argv: [String]) -> Never {
         case "--agc": i += 1; if i < argv.count { agcOn = (argv[i] != "off") }
         case "--normalize": i += 1; if i < argv.count { normalizeOn = (argv[i] != "off") }
         case "--channels": i += 1; if i < argv.count { outChannels = (Int(argv[i]) == 1) ? 1 : 2 }
+        case "--samplerate": i += 1; if i < argv.count { mixSampleRate = Int(argv[i]) ?? 48000 }
         default: break
         }
         i += 1
@@ -628,11 +641,13 @@ func runMix(_ argv: [String]) -> Never {
 
     let outURL = URL(fileURLWithPath: out)
     try? FileManager.default.removeItem(at: outURL)
+    // 出力サンプルレートは 48000Hz 固定（ミックスバッファが 48000Hz のため。再サンプルによる劣化/失敗を避ける）。
+    // ファイルサイズは設定サンプルレートに比例したビットレートで縮める。
     let outSettings: [String: Any] = [
         AVFormatIDKey: kAudioFormatMPEG4AAC,
         AVSampleRateKey: 48000,
         AVNumberOfChannelsKey: outChannels,
-        AVEncoderBitRateKey: 192000,
+        AVEncoderBitRateKey: scaledBitrate(192000, sampleRate: mixSampleRate),
     ]
     do {
         let outFile = try AVAudioFile(forWriting: outURL, settings: outSettings)

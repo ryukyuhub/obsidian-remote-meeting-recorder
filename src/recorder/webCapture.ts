@@ -50,6 +50,18 @@ export function pickAudioFormat(): { mimeType: string; ext: string } {
   return { mimeType: "", ext: ".webm" }; // ブラウザ既定に委ねる
 }
 
+/**
+ * サンプルレートに見合った AAC ビットレート（bps）を返す。
+ * M4A(AAC) のファイルサイズはサンプルレートではなくビットレートで決まるため、
+ * サンプルレートを下げたら合わせてビットレートも下げないとファイルは小さくならない。
+ * （低サンプルレート＝帯域が狭いので低ビットレートで十分。）
+ */
+export function bitrateForSampleRate(sampleRate: number): number {
+  if (sampleRate <= 16000) return 48000; // 文字起こし相当・小容量
+  if (sampleRate <= 24000) return 64000; // 標準品質・約半分
+  return 128000; // 48000Hz 高音質（既定）
+}
+
 export interface WebRecorderOptions {
   /** 出力ファイルの絶対パス（拡張子は pickAudioFormat と整合していること）。 */
   out: string;
@@ -58,6 +70,8 @@ export interface WebRecorderOptions {
   micDevice?: string;
   /** MediaRecorder の mimeType（空ならブラウザ既定）。 */
   mimeType: string;
+  /** 録音サンプルレート（Hz）。省略時は AudioContext 既定（通常デバイス値）。 */
+  sampleRate?: number;
   /** 予期しない終了（トラック切断・録音エラー・onunload 以外の停止）で呼ばれる。 */
   onTerminated?: () => void;
 }
@@ -71,6 +85,7 @@ export class WebRecorder {
   private readonly source: RecorderSource;
   private readonly micDevice?: string;
   private readonly mimeType: string;
+  private readonly sampleRate?: number;
   private readonly onTerminated?: () => void;
 
   private systemStream: MediaStream | null = null;
@@ -92,6 +107,7 @@ export class WebRecorder {
     this.source = o.source;
     this.micDevice = o.micDevice;
     this.mimeType = o.mimeType;
+    this.sampleRate = o.sampleRate;
     this.onTerminated = o.onTerminated;
   }
 
@@ -108,6 +124,9 @@ export class WebRecorder {
     }
 
     // ミックス（system + mic → 単一の MediaStream）。表示用 Analyser も同じソースから分岐。
+    // AudioContext は必ずデバイス既定レートで作る。特定レートを強制すると getDisplayMedia の
+    // ループバック音声（system）がリサンプルできず無音＝データ 0 バイトになることがあるため。
+    // ファイルサイズはサンプルレートではなくビットレート（下の audioBitsPerSecond）で縮める。
     this.audioCtx = new AudioContext();
     const dest = this.audioCtx.createMediaStreamDestination();
     this.analyser = this.audioCtx.createAnalyser();
@@ -129,7 +148,11 @@ export class WebRecorder {
     });
 
     // MediaRecorder。timeslice ごとに ondataavailable → ディスクへ順序保証で追記。
-    const opts = this.mimeType ? { mimeType: this.mimeType } : undefined;
+    // 設定サンプルレートに見合ったビットレートを指定 → ファイルサイズがこれで実際に縮む。
+    // （録音自体はデバイス既定レートで行い、サイズはビットレートで制御する。）
+    const opts: MediaRecorderOptions = {};
+    if (this.mimeType) opts.mimeType = this.mimeType;
+    opts.audioBitsPerSecond = bitrateForSampleRate(this.sampleRate ?? this.audioCtx.sampleRate);
     this.recorder = new MediaRecorder(dest.stream, opts);
     this.recorder.ondataavailable = (e) => {
       if (e.data && e.data.size > 0) this.enqueueChunk(e.data);

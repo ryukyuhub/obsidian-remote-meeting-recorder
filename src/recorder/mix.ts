@@ -35,6 +35,9 @@ export function runMix(
       agc,
       "--channels",
       channels,
+      // 出力ビットレート算出用（サンプルレートを下げると mix 出力も小さくなる）。
+      "--samplerate",
+      String(ctx.settings.sampleRate),
     ];
     let child;
     try {

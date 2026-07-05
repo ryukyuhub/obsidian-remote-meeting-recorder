@@ -176,7 +176,10 @@ export class RecordingView extends ItemView {
 
     root.createDiv({
       cls: "rmr-warn",
-      text: "⚠ MacBook の蓋を閉じると録音は止まります",
+      text:
+        process.platform === "win32"
+          ? "⚠ ノート PC の蓋を閉じる／スリープすると録音は止まります"
+          : "⚠ MacBook の蓋を閉じる／スリープすると録音は止まります",
     });
   }
 

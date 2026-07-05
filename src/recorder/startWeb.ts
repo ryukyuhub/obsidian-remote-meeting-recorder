@@ -36,6 +36,7 @@ export async function startWebRecording(
     source: o.source,
     micDevice: o.micDevice,
     mimeType: fmt.mimeType,
+    sampleRate: o.sampleRate ?? ctx.settings.sampleRate,
     onTerminated: () => onTerminated(id),
   });
 

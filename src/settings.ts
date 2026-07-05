@@ -225,7 +225,8 @@ export class RMRSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("サンプルレート")
       .setDesc(
-        "録音の音質。48000 Hz が高音質（既定・推奨）。数字を下げるとファイルは小さくなりますが音は粗くなります。" +
+        "録音の音質。48000 Hz が高音質（既定・推奨）。数字を下げるとサンプルレートに合わせてビットレートも下がり、" +
+          "ファイルは小さくなりますが音は粗くなります（Windows・macOS 共通で有効）。" +
           "文字起こし用の 16kHz 変換は別途自動で行うので、通常は 48000 のままでOK。"
       )
       .addDropdown((dd) =>

@@ -71,6 +71,17 @@
 .rmr-btn-rec {
   color: var(--color-red);
 }
+/* 録音アイコンは中身を塗りつぶした赤い丸にする（lucide circle は既定で輪郭のみ） */
+.rmr-btn-rec .svg-icon {
+  color: var(--color-red);
+  fill: var(--color-red);
+  stroke: var(--color-red);
+}
+.rmr-btn-rec:disabled .svg-icon {
+  color: var(--text-muted);
+  fill: var(--text-muted);
+  stroke: var(--text-muted);
+}
 .rmr-btn-stop {
   color: var(--text-normal);
 }
