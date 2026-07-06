@@ -1,4 +1,14 @@
-import { MarkdownView, Notice, Plugin, TFile, WorkspaceLeaf, normalizePath } from "obsidian";
+import {
+  Editor,
+  MarkdownFileInfo,
+  MarkdownView,
+  Menu,
+  Notice,
+  Plugin,
+  TFile,
+  WorkspaceLeaf,
+  normalizePath,
+} from "obsidian";
 import * as path from "path";
 import { DEFAULT_SETTINGS, RMRSettingTab, type RMRSettings } from "./settings";
 import { createContext, getVaultBasePath, type RecorderContext } from "./context";
@@ -22,7 +32,11 @@ import { sessionPaths } from "./state/paths";
 import { WebAudioTap } from "./audio/webAudioTap";
 import { ControlWindowManager } from "./ui/controlWindow";
 import { runTranscription } from "./transcribe/runTranscription";
+import { runTranscribeJob } from "./transcribe/job";
+import { findExistingTranscript, transcriptKey } from "./transcribe/insertTranscript";
+import { isAudioFile } from "./transcribe/audioFormats";
 import { TranscribePicker } from "./ui/TranscribePicker";
+import { TranscribeOptionsModal } from "./ui/TranscribeOptionsModal";
 
 // Notice 表示時間（ms）。長め＝内容を読ませたい警告 / エラー＝失敗通知。
 const NOTICE_LONG_MS = 10000;
@@ -46,6 +60,12 @@ function toActiveRecordingInfo(meta: SessionMeta): ActiveRecordingInfo {
     startedAt: meta.startedAt,
     label: meta.label,
   };
+}
+
+/** 行から音声埋め込み `![[linktext]]` の linktext（`|`/`#` より前）を取り出す。無ければ null。 */
+function extractEmbedLinktext(line: string): string | null {
+  const m = line.match(/!\[\[([^\]|#]+)/);
+  return m ? m[1].trim() : null;
 }
 
 export interface StartFromViewInput {
@@ -93,6 +113,7 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
 
     this.registerCommands();
     this.registerFileMenu();
+    this.registerEmbedTranscribeMenus();
 
     // 起動時: 孤児掃除 → セッション復元（設計書 §7）
     this.app.workspace.onLayoutReady(() => this.restoreSessions());
@@ -132,19 +153,78 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
     });
   }
 
-  /** ノート（.md）右クリック → 「ここに会議録音を埋め込む」。 */
+  /**
+   * ファイルエクスプローラの右クリック。
+   * .md → 「ここに会議録音を埋め込む」／音声ファイル → 「文字起こし（RMR）」。
+   */
   private registerFileMenu(): void {
     this.registerEvent(
       this.app.workspace.on("file-menu", (menu, file) => {
-        if (!(file instanceof TFile) || file.extension !== "md") return;
+        if (!(file instanceof TFile)) return;
+        if (file.extension === "md") {
+          menu.addItem((item) =>
+            item
+              .setTitle("ここに会議録音を埋め込む")
+              .setIcon("circle-dot")
+              .onClick(() => void this.startRecordingHere(file))
+          );
+          return;
+        }
+        if (isAudioFile(file)) {
+          menu.addItem((item) =>
+            item
+              .setTitle("文字起こし（RMR）")
+              .setIcon("captions")
+              .onClick(() => void this.transcribeAudioFile(file))
+          );
+        }
+      })
+    );
+  }
+
+  /**
+   * ノート内の埋め込み音声 `![[...]]` の右クリックに「文字起こし（RMR）」を出す。
+   * ソース/ライブプレビューのテキスト上は editor-menu、描画された音声プレイヤーは
+   * DOM の contextmenu（Chromium 既定の音声メニューを差し替え）で拾う。
+   */
+  private registerEmbedTranscribeMenus(): void {
+    // ソース表示で `![[audio]]` 行を右クリック
+    this.registerEvent(
+      this.app.workspace.on("editor-menu", (menu, editor: Editor, info: MarkdownFileInfo) => {
+        const line = editor.getCursor().line;
+        const linktext = extractEmbedLinktext(editor.getLine(line));
+        if (!linktext) return;
+        const note = info.file ?? this.app.workspace.getActiveViewOfType(MarkdownView)?.file ?? null;
+        const audio = this.app.metadataCache.getFirstLinkpathDest(linktext, note?.path ?? "");
+        if (!(audio instanceof TFile) || !isAudioFile(audio)) return;
         menu.addItem((item) =>
           item
-            .setTitle("ここに会議録音を埋め込む")
-            .setIcon("circle-dot")
-            .onClick(() => void this.startRecordingHere(file))
+            .setTitle("文字起こし（RMR）")
+            .setIcon("captions")
+            .onClick(() => void this.transcribeEmbed(audio, note, line))
         );
       })
     );
+
+    // 描画された音声埋め込みを右クリック（閲覧ビュー・ライブプレビュー）
+    this.registerDomEvent(document, "contextmenu", (evt) => {
+      const target = evt.target as HTMLElement | null;
+      const embed = target?.closest?.(".internal-embed") as HTMLElement | null;
+      const src = embed?.getAttribute("src");
+      if (!src) return;
+      const mdView = this.app.workspace.getActiveViewOfType(MarkdownView);
+      const audio = this.app.metadataCache.getFirstLinkpathDest(src, mdView?.file?.path ?? "");
+      if (!(audio instanceof TFile) || !isAudioFile(audio)) return;
+      evt.preventDefault();
+      const menu = new Menu();
+      menu.addItem((item) =>
+        item
+          .setTitle("文字起こし（RMR）")
+          .setIcon("captions")
+          .onClick(() => void this.transcribeEmbed(audio, mdView?.file ?? null, undefined, src))
+      );
+      menu.showAtMouseEvent(evt);
+    });
   }
 
   onunload(): void {
@@ -478,10 +558,100 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
     return listMicDevices(this.buildContext().resolveBinPath());
   }
 
-  /** 既存の録音ファイルを手動で文字起こし（アクティブノートがあればそこへ追記）。 */
+  /** 既存の録音ファイルを手動で文字起こし（オプション選択 → 既存フォールバックへ挿入）。 */
   async transcribeFile(audioPath: string): Promise<void> {
-    const target = this.app.workspace.getActiveViewOfType(MarkdownView)?.file ?? null;
-    await runTranscription(this, audioPath, target);
+    const audioRel = computeVaultRelative(this.app, audioPath);
+    await this.openTranscribeOptions({ audioPath, audioRel, note: null });
+  }
+
+  /** ファイルエクスプローラの音声ファイルを文字起こし（ノート文脈なし → フォールバック）。 */
+  async transcribeAudioFile(file: TFile): Promise<void> {
+    const base = getVaultBasePath(this.app);
+    if (!base) {
+      new Notice("Vault パスを取得できません。");
+      return;
+    }
+    await this.openTranscribeOptions({
+      audioPath: path.join(base, file.path),
+      audioRel: file.path,
+      note: null,
+    });
+  }
+
+  /** 埋め込み音声の文字起こし（結果は埋め込み直下へ挿入・重複は検出して選択）。 */
+  async transcribeEmbed(
+    audio: TFile,
+    note: TFile | null,
+    anchorLine?: number,
+    srcHint?: string
+  ): Promise<void> {
+    const base = getVaultBasePath(this.app);
+    if (!base) {
+      new Notice("Vault パスを取得できません。");
+      return;
+    }
+    let line = anchorLine;
+    if (line == null && note) line = await this.findEmbedLine(note, audio, srcHint);
+    await this.openTranscribeOptions({
+      audioPath: path.join(base, audio.path),
+      audioRel: audio.path,
+      note,
+      anchorLine: line,
+    });
+  }
+
+  /** ノート本文から音声埋め込み行（0 始まり）を探す。見つからなければ undefined。 */
+  private async findEmbedLine(
+    note: TFile,
+    audio: TFile,
+    srcHint?: string
+  ): Promise<number | undefined> {
+    let content: string;
+    try {
+      content = await this.app.vault.read(note);
+    } catch {
+      return undefined;
+    }
+    const lines = content.split("\n");
+    for (let i = 0; i < lines.length; i++) {
+      const l = lines[i];
+      if (!l.includes("![[")) continue;
+      if (srcHint && l.includes(srcHint)) return i;
+      if (l.includes(audio.name) || l.includes(audio.basename)) return i;
+    }
+    return undefined;
+  }
+
+  /** 文字起こしの実行オプション（毎回モデル/言語/重複時の扱い）を出してから実行する。 */
+  async openTranscribeOptions(ctx: {
+    audioPath: string;
+    audioRel: string | null;
+    note: TFile | null;
+    anchorLine?: number;
+  }): Promise<void> {
+    // 既存トランスクリプトの有無（モーダルで 置換/追記/中止 を出すかの判定）
+    let existing = false;
+    if (ctx.note) {
+      try {
+        const content = await this.app.vault.read(ctx.note);
+        const key = transcriptKey(ctx.audioRel, ctx.audioPath);
+        existing = findExistingTranscript(content.split("\n"), key, ctx.anchorLine) != null;
+      } catch {
+        /* 読めなければ既存なし扱い */
+      }
+    }
+    const audioName = path.basename(ctx.audioPath);
+    new TranscribeOptionsModal(this, audioName, existing, (opts) => {
+      void runTranscribeJob(this, {
+        audioPath: ctx.audioPath,
+        audioRel: ctx.audioRel,
+        note: ctx.note,
+        anchorLine: ctx.anchorLine,
+        model: opts.model,
+        language: opts.language,
+        dupMode: opts.dupMode,
+      });
+    }).open();
   }
 
   // ================================================================

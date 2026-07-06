@@ -165,6 +165,19 @@
   color: var(--color-orange);
 }
 
+/* --- 文字起こし（右クリック実行） --- */
+/* 進捗 Notice のキャンセルボタン */
+.rmr-tx-cancel {
+  margin-top: 6px;
+}
+/* オプションモーダルのモデル準備状況の注記 */
+.rmr-tx-model-note-ok {
+  color: var(--text-muted);
+}
+.rmr-tx-model-note-warn {
+  color: var(--text-warning);
+}
+
 /* --- 診断モーダル --- */
 .rmr-doctor .setting-item {
   border-top: 1px solid var(--background-modifier-border);

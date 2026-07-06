@@ -12,6 +12,11 @@ export async function decodeToPcm16k(bytes: ArrayBuffer): Promise<Float32Array> 
   try {
     // decodeAudioData は ArrayBuffer を detach するので複製を渡す
     audioBuf = await decodeCtx.decodeAudioData(bytes.slice(0));
+  } catch {
+    // Chromium が対応しない形式・破損ファイル等。無言失敗にせず対処が分かるエラーにする（§4.2）。
+    throw new Error(
+      "この音声ファイルを読み込めませんでした。対応形式は m4a / mp3 / wav / aac / flac / ogg / mp4 などです。ファイルが壊れていないか確認してください。"
+    );
   } finally {
     void decodeCtx.close();
   }

@@ -331,6 +331,13 @@ export class RMRSettingTab extends PluginSettingTab {
         "見つからない・うまく動かないときは、上の「診断（doctor）」で状態と対処を確認できます。"
     );
 
+    const rightClickNote = containerEl.createEl("p", { cls: "rmr-settings-note" });
+    rightClickNote.setText(
+      "保存済みの音声はいつでも文字起こしできます: ファイルエクスプローラの音声ファイル、" +
+        "またはノート内の埋め込み音声 ![[…]] を右クリック →「文字起こし（RMR）」。" +
+        "実行時にモデル・言語を選べ、既存の結果は置換／追記を選べます。"
+    );
+
     this.bindDropdown(
       "言語",
       "文字起こしの言語。日本語か英語を選ぶと精度が安定します。auto は音声から自動判定します。",

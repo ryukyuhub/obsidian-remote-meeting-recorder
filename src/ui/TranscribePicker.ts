@@ -3,6 +3,7 @@ import * as path from "path";
 import type RemoteMeetingRecorderPlugin from "../main";
 import { getVaultBasePath } from "../context";
 import { getElectronRemote } from "../platform/electron";
+import { AUDIO_EXTS } from "../transcribe/audioFormats";
 
 /* eslint-disable @typescript-eslint/no-explicit-any -- Electron の remote.dialog は型情報が乏しく any 経由で扱う */
 
@@ -11,8 +12,6 @@ interface Choice {
   kind: "vault" | "browse";
   file?: TFile;
 }
-
-const AUDIO_EXTS = ["m4a", "wav", "mp3", "flac", "ogg"];
 
 /**
  * 既存の録音ファイルを選んで文字起こしする（設計書 §15.2 ①・手動起動）。

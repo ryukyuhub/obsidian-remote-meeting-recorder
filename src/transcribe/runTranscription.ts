@@ -4,14 +4,14 @@ import * as os from "os";
 import * as path from "path";
 import type RemoteMeetingRecorderPlugin from "../main";
 import { decodeToPcm16k, pcmToWav } from "./pcm";
-import { transcribeWav } from "./whisperCppClient";
+import { transcribeWav, TranscribeCancelled } from "./whisperCppClient";
 import { resolveWhisperBin, resolveWhisperModel } from "./resolveWhisper";
 import { computeVaultRelative, wikilinkEmbed } from "../ui/embed";
 import { resolveDailyNote } from "../ui/dailyNote";
 import { formatClock, formatDate } from "../util/time";
 import { safeUnlink } from "../util/fsx";
 
-function readArrayBuffer(p: string): ArrayBuffer {
+export function readArrayBuffer(p: string): ArrayBuffer {
   const buf = fs.readFileSync(p);
   return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) as ArrayBuffer;
 }
@@ -41,7 +41,7 @@ export async function runTranscription(
   };
   const ticker = window.setInterval(() => notice.setMessage(render()), 1000);
   try {
-    const result = await transcribeViaWhisperCpp(plugin, audioPath, {
+    const result = await transcribeAudioToText(plugin, audioPath, {
       onRun: () => {
         phase = "run";
       },
@@ -75,7 +75,13 @@ export async function runTranscription(
   }
 }
 
-interface TranscribeCallbacks {
+export interface TranscribeCoreOptions {
+  /** Whisper モデル指定の上書き（名前 or .bin パス）。未指定なら設定値。 */
+  model?: string;
+  /** 言語の上書き（例: ja / en / auto）。未指定なら設定値。 */
+  language?: string;
+  /** キャンセル用シグナル。 */
+  signal?: AbortSignal;
   /** whisper 実行フェーズに入ったとき（準備＝モデル読込/デコードが終わったとき）。 */
   onRun?: () => void;
   /** 進捗（0..100）。 */
@@ -107,11 +113,15 @@ async function ensureLocalModel(model: string, stateDir: string): Promise<string
   }
 }
 
-/** whisper.cpp（同梱バイナリ）で文字起こし。全文と録音長（16kHz PCM から算出）を返す。失敗時は Notice して null。 */
-async function transcribeViaWhisperCpp(
+/**
+ * whisper.cpp（同梱バイナリ）で文字起こし。全文と録音長（16kHz PCM から算出）を返す。失敗時は Notice して null。
+ * m4a 等 → 16kHz mono PCM（Web Audio でデコード） → WAV → whisper-cli。
+ * モデル/言語は上書き可能（右クリック実行時の選択）。abort シグナルで中断すると TranscribeCancelled を投げる。
+ */
+export async function transcribeAudioToText(
   plugin: RemoteMeetingRecorderPlugin,
   audioPath: string,
-  cb: TranscribeCallbacks = {}
+  opts: TranscribeCoreOptions = {}
 ): Promise<{ text: string; durationSec: number } | null> {
   const s = plugin.settings;
   const pluginDir = plugin.getPluginDir();
@@ -123,25 +133,33 @@ async function transcribeViaWhisperCpp(
     );
     return null;
   }
-  const model = resolveWhisperModel(pluginDir, s.whisperCppModel);
+  const modelSpec = opts.model ?? s.whisperCppModel;
+  const model = resolveWhisperModel(pluginDir, modelSpec);
   if (!model) {
-    new Notice("Whisper モデルが見つかりません。診断（doctor）からダウンロードしてください。", 10000);
+    new Notice(
+      `Whisper モデル「${modelSpec || "（既定）"}」が見つかりません。診断（doctor）からダウンロードしてください。`,
+      10000
+    );
     return null;
   }
   // モデルをローカルの状態ディレクトリにキャッシュ（G: 等の遅いドライブ・日本語パスを避け読込高速化）。
   const localModel = await ensureLocalModel(model, plugin.buildContext().paths.stateDir);
 
+  if (opts.signal?.aborted) throw new TranscribeCancelled();
   // m4a → 16kHz mono PCM → WAV（whisper.cpp は m4a 非対応・wav/flac/mp3/ogg のみ）
   const pcm = await decodeToPcm16k(readArrayBuffer(audioPath));
+  if (opts.signal?.aborted) throw new TranscribeCancelled();
   const durationSec = pcm.length / 16000; // 16kHz mono なのでサンプル数÷16000＝秒
   const wavBuf = pcmToWav(pcm, 16000);
   const base = path.join(os.tmpdir(), `rmr-tx-${process.pid}-${pcm.length}`);
   const wavPath = `${base}.wav`;
   fs.writeFileSync(wavPath, Buffer.from(wavBuf));
-  cb.onRun?.(); // 準備完了 → 実行フェーズへ
+  opts.onRun?.(); // 準備完了 → 実行フェーズへ
   try {
-    const text = await transcribeWav(bin, localModel, wavPath, s.transcribeLanguage || "auto", base, {
-      onProgress: cb.onProgress,
+    const language = (opts.language ?? s.transcribeLanguage) || "auto";
+    const text = await transcribeWav(bin, localModel, wavPath, language, base, {
+      onProgress: opts.onProgress,
+      signal: opts.signal,
     });
     return { text, durationSec };
   } finally {
@@ -149,7 +167,7 @@ async function transcribeViaWhisperCpp(
   }
 }
 
-function buildMarkdown(text: string, dateTime: string, lang?: string): string {
+export function buildMarkdown(text: string, dateTime: string, lang?: string): string {
   const heading = `\n> [!note] 文字起こし${lang && lang !== "auto" ? `（${lang}）` : ""}`;
   return `${heading}\n\n### ${dateTime}\n${text}\n`;
 }
@@ -159,7 +177,7 @@ function buildMarkdown(text: string, dateTime: string, lang?: string): string {
  * 開始は既定命名 `YYYY-MM-DD-HHMM` から復元（カスタム名等ならファイル更新時刻を終了とみなし
  * 録音長ぶんさかのぼる）。終了は開始＋録音長。日をまたぐ場合は終了側にも日付を付ける。
  */
-function recordingTimeRange(audioPath: string, durationSec: number): string {
+export function recordingTimeRange(audioPath: string, durationSec: number): string {
   const start = recordingStart(audioPath, durationSec);
   const end = new Date(start.getTime() + Math.max(0, durationSec) * 1000);
 

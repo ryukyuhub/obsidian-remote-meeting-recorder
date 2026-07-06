@@ -7,6 +7,16 @@ import { safeUnlink } from "../util/fsx";
 export interface TranscribeOptions {
   /** 進捗（0..100）。whisper の -pp 出力を解析して呼ぶ。 */
   onProgress?: (percent: number) => void;
+  /** キャンセル用シグナル。abort されたら whisper 子プロセスを kill して中断する。 */
+  signal?: AbortSignal;
+}
+
+/** ユーザーが明示的に中止したことを表す（呼び出し側でエラー扱いしないための番兵）。 */
+export class TranscribeCancelled extends Error {
+  constructor() {
+    super("文字起こしをキャンセルしました");
+    this.name = "TranscribeCancelled";
+  }
 }
 
 // 文字起こし全体のタイムアウト（長尺音声＋CPU 推論を見込んで 1 時間）。
@@ -48,7 +58,7 @@ export async function transcribeWav(
     "-of", outBase,
   ];
 
-  await runWhisper(bin, args, cwd, opts.onProgress);
+  await runWhisper(bin, args, cwd, opts.onProgress, opts.signal);
 
   const txtPath = `${outBase}.txt`;
   let text = "";
@@ -65,12 +75,38 @@ function runWhisper(
   bin: string,
   args: string[],
   cwd: string | undefined,
-  onProgress?: (percent: number) => void
+  onProgress?: (percent: number) => void,
+  signal?: AbortSignal
 ): Promise<void> {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new TranscribeCancelled());
+      return;
+    }
     const child = spawn(bin, args, cwd ? { cwd } : {});
     let log = "";
     let lastPct = -1;
+    let settled = false;
+
+    // タイムアウト・abort・close/error のどれで終わっても後始末を一度だけ行う。
+    const finish = (fn: () => void): void => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timer);
+      if (onAbort) signal?.removeEventListener("abort", onAbort);
+      fn();
+    };
+    const onAbort = signal
+      ? () => {
+          try {
+            child.kill();
+          } catch {
+            /* noop */
+          }
+          finish(() => reject(new TranscribeCancelled()));
+        }
+      : undefined;
+    if (onAbort) signal?.addEventListener("abort", onAbort);
 
     const onData = (buf: Buffer) => {
       const text = buf.toString();
@@ -96,17 +132,16 @@ function runWhisper(
       } catch {
         /* noop */
       }
-      reject(new Error("文字起こしがタイムアウトしました（1時間）。"));
+      finish(() => reject(new Error("文字起こしがタイムアウトしました（1時間）。")));
     }, TRANSCRIBE_TIMEOUT_MS);
 
-    child.on("error", (e) => {
-      window.clearTimeout(timer);
-      reject(e);
-    });
+    child.on("error", (e) => finish(() => reject(e)));
     child.on("close", (code) => {
-      window.clearTimeout(timer);
-      if (code === 0) resolve();
-      else reject(new Error(`whisper-cli が失敗しました (exit ${code})\n${log.slice(-2000)}`));
+      finish(() =>
+        code === 0
+          ? resolve()
+          : reject(new Error(`whisper-cli が失敗しました (exit ${code})\n${log.slice(-2000)}`))
+      );
     });
   });
 }
