@@ -33,7 +33,7 @@ import { WebAudioTap } from "./audio/webAudioTap";
 import { ControlWindowManager } from "./ui/controlWindow";
 import { runTranscription } from "./transcribe/runTranscription";
 import { runTranscribeJob } from "./transcribe/job";
-import { findExistingTranscript, transcriptKey } from "./transcribe/insertTranscript";
+import { findExistingTranscript, findEmbedLine } from "./transcribe/insertTranscript";
 import { isAudioFile } from "./transcribe/audioFormats";
 import { TranscribePicker } from "./ui/TranscribePicker";
 import { TranscribeOptionsModal } from "./ui/TranscribeOptionsModal";
@@ -591,7 +591,7 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
       return;
     }
     let line = anchorLine;
-    if (line == null && note) line = await this.findEmbedLine(note, audio, srcHint);
+    if (line == null && note) line = await this.resolveEmbedLine(note, audio, srcHint);
     await this.openTranscribeOptions({
       audioPath: path.join(base, audio.path),
       audioRel: audio.path,
@@ -601,7 +601,7 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
   }
 
   /** ノート本文から音声埋め込み行（0 始まり）を探す。見つからなければ undefined。 */
-  private async findEmbedLine(
+  private async resolveEmbedLine(
     note: TFile,
     audio: TFile,
     srcHint?: string
@@ -612,14 +612,8 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
     } catch {
       return undefined;
     }
-    const lines = content.split("\n");
-    for (let i = 0; i < lines.length; i++) {
-      const l = lines[i];
-      if (!l.includes("![[")) continue;
-      if (srcHint && l.includes(srcHint)) return i;
-      if (l.includes(audio.name) || l.includes(audio.basename)) return i;
-    }
-    return undefined;
+    // src（埋め込みに書かれたリンクテキスト）優先、無ければ Vault 相対パスで照合
+    return findEmbedLine(content.split("\n"), srcHint ?? audio.path, audio.name);
   }
 
   /** 文字起こしの実行オプション（毎回モデル/言語/重複時の扱い）を出してから実行する。 */
@@ -633,9 +627,10 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
     let existing = false;
     if (ctx.note) {
       try {
-        const content = await this.app.vault.read(ctx.note);
-        const key = transcriptKey(ctx.audioRel, ctx.audioPath);
-        existing = findExistingTranscript(content.split("\n"), key, ctx.anchorLine) != null;
+        const lines = (await this.app.vault.read(ctx.note)).split("\n");
+        const anchor =
+          ctx.anchorLine ?? findEmbedLine(lines, ctx.audioRel, path.basename(ctx.audioPath));
+        existing = findExistingTranscript(lines, anchor) != null;
       } catch {
         /* 読めなければ既存なし扱い */
       }

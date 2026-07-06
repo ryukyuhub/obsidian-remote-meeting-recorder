@@ -18,6 +18,13 @@ const MODEL_OPTIONS: [string, string][] = [
   ["base", "base（最速・軽量）"],
 ];
 
+/** 言語選択肢（設定と同じ並び）。 */
+const LANGUAGE_OPTIONS: [string, string][] = [
+  ["ja", "日本語（ja）"],
+  ["en", "英語（en）"],
+  ["auto", "自動判定（auto）"],
+];
+
 /**
  * 右クリック「文字起こし（RMR）」で毎回開く実行オプションのダイアログ。
  * モデル/言語を設定の既定から上書きでき（§4.3/4.4）、既存トランスクリプト検出時は
@@ -37,7 +44,10 @@ export class TranscribeOptionsModal extends Modal {
     super(plugin.app);
     const s = plugin.settings;
     this.model = s.whisperCppModel || "large-v3-turbo-q5_0";
-    this.language = s.transcribeLanguage || "ja";
+    // 言語は ja/en/auto の3択に正規化（未知の値は ja 扱い）
+    this.language = LANGUAGE_OPTIONS.some(([v]) => v === s.transcribeLanguage)
+      ? s.transcribeLanguage
+      : "ja";
     // 既存があるときの既定は「置換」（より良いモデルでの再文字起こしを想定）。
     this.mode = "replace";
   }
@@ -66,15 +76,16 @@ export class TranscribeOptionsModal extends Modal {
     modelNote = contentEl.createEl("p", { cls: "rmr-settings-note" });
     this.updateModelNote(modelNote);
 
-    // 言語
+    // 言語（選択式）
     new Setting(contentEl)
       .setName("言語")
-      .setDesc("例: ja / en / auto。")
-      .addText((t) =>
-        t.setPlaceholder("ja").setValue(this.language).onChange((v) => {
-          this.language = v.trim();
-        })
-      );
+      .setDesc("日本語か英語を選ぶと精度が安定します。auto は音声から自動判定します。")
+      .addDropdown((d) => {
+        for (const [value, label] of LANGUAGE_OPTIONS) d.addOption(value, label);
+        d.setValue(this.language).onChange((v) => {
+          this.language = v;
+        });
+      });
 
     // 重複時の扱い（既存検出時のみ）
     if (this.existingDetected) {

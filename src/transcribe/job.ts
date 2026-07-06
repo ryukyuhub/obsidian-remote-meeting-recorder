@@ -1,13 +1,9 @@
 import { Notice, TFile } from "obsidian";
+import * as path from "path";
 import type RemoteMeetingRecorderPlugin from "../main";
 import { transcribeAudioToText, buildMarkdown, recordingTimeRange } from "./runTranscription";
 import { TranscribeCancelled } from "./whisperCppClient";
-import {
-  transcriptKey,
-  upsertTranscript,
-  resolveInsertTarget,
-  type DupMode,
-} from "./insertTranscript";
+import { upsertTranscript, resolveInsertTarget, type DupMode } from "./insertTranscript";
 
 /** 右クリック文字起こし1回分の指示。 */
 export interface TranscribeJob {
@@ -89,11 +85,12 @@ export async function runTranscribeJob(
 
     const range = recordingTimeRange(job.audioPath, result.durationSec);
     const md = buildMarkdown(result.text.trim(), range, job.language);
-    const key = transcriptKey(job.audioRel, job.audioPath);
+    const embedHint = { rel: job.audioRel, name: path.basename(job.audioPath) };
 
     if (job.note) {
-      await upsertTranscript(plugin.app, job.note, key, md, {
+      await upsertTranscript(plugin.app, job.note, md, {
         anchorLine: job.anchorLine,
+        embedHint,
         dupMode: job.dupMode,
       });
     } else {
@@ -102,7 +99,8 @@ export async function runTranscribeJob(
         new Notice("文字起こし結果の保存先ノートを作成できませんでした。");
         return;
       }
-      await upsertTranscript(plugin.app, target.note, key, md, {
+      await upsertTranscript(plugin.app, target.note, md, {
+        embedHint,
         dupMode: job.dupMode,
         prependEmbed: target.prependEmbed,
       });

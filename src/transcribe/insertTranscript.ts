@@ -5,36 +5,32 @@ import { resolveDailyNote } from "../ui/dailyNote";
 
 /* 右クリック文字起こしの結果挿入（冪等・重複防止・設計書 §15.2 の手動起点）。
  *
- * 挿入したトランスクリプトは不可視のマーカー（Obsidian コメント %% %%）で囲む。
- * これにより「同一音声への再実行」で以前の結果を確実に特定して置換でき、重複挿入を防げる。
- * マーカーは閲覧ビュー・ライブプレビューでは表示されないため、見た目のフォーマットは
- * 既存（停止時 自動文字起こし）と同一を保つ（§6 受け入れ基準）。 */
+ * 挿入は停止時 自動文字起こしと同一のプレーンなコールアウト（マーカー無し）。
+ * 「同一音声への再実行」は、その音声の埋め込み `![[…]]` を手がかりに直後のトランスクリプトを
+ * 特定して置換する。これによりノートに不可視コメント等のゴミを残さず、見た目のフォーマットも
+ * 既存と完全に一致する（§6 受け入れ基準）。 */
 
-const MARK_CLOSE = "%%/rmr-tx%%";
+/** 旧版が挿入していた不可視マーカー（再文字起こし時に掃除して除去するために検出する）。 */
+const LEGACY_MARK_OPEN = /^%%rmr-tx:.*%%$/;
+const LEGACY_MARK_CLOSE = "%%/rmr-tx%%";
 
-/** キーからマーカー開始行を作る。 */
-function markOpen(key: string): string {
-  return `%%rmr-tx:${key}%%`;
+/** 音声埋め込み行を探す手がかり。 */
+export interface EmbedHint {
+  /** Vault 相対パス（Vault 外なら null）。一意に当てるため優先的に照合。 */
+  rel: string | null;
+  /** ファイル名（拡張子込み）。rel が無い/当たらないときの照合に使う。 */
+  name: string;
 }
 
-/** マーカーキーに使えない文字（% と改行）を除去。 */
-function sanitizeKey(k: string): string {
-  return k.replace(/%/g, "").replace(/\r?\n/g, " ").trim();
-}
-
-/**
- * 音声を一意に指すキー。Vault 内なら相対パス（機種非依存で安定）、外ならファイル名。
- * 同一音声の再文字起こしを検出・置換するために使う。
- */
-export function transcriptKey(rel: string | null, audioPath: string): string {
-  const id = rel || audioPath.split(/[\\/]/).pop() || audioPath;
-  return sanitizeKey(id);
-}
-
-/** 可視ブロック（buildMarkdown の出力）をマーカーで囲んだ行配列にする。前後に空行を付ける。 */
-function wrappedBlockLines(md: string, key: string): string[] {
-  const body = md.trim();
-  return ["", markOpen(key), ...body.split("\n"), MARK_CLOSE, ""];
+/** 本文から音声埋め込み `![[…]]` 行（0 始まり）を探す。見つからなければ undefined。 */
+export function findEmbedLine(lines: string[], rel: string | null, name: string): number | undefined {
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i];
+    if (!l.includes("![[")) continue;
+    if (rel && l.includes(rel)) return i;
+    if (l.includes(name)) return i;
+  }
+  return undefined;
 }
 
 /** 既存トランスクリプトの行範囲（[startLine, endLineExclusive)）。 */
@@ -44,95 +40,102 @@ export interface ExistingRange {
 }
 
 /**
- * ノート内の既存トランスクリプトを探す。
- * 1) マーカー付きブロック（キー一致）を最優先で正確に特定。
- * 2) マーカーが無い場合（停止時 自動文字起こし等の旧ブロック）、埋め込み行 anchorLine の
- *    直後にある `> [!note] 文字起こし` コールアウトをヒューリスティックに特定。
- * 見つからなければ null。
+ * 埋め込み行 anchorLine の直後にある既存トランスクリプト（`> [!note] 文字起こし` コールアウト）を探す。
+ * 旧版の不可視マーカー（%%rmr-tx:…%% … %%/rmr-tx%%）が付いていればそれも範囲に含め、置換時に一緒に掃除する。
+ * anchorLine が無い／直後にトランスクリプトが無ければ null。
+ *
+ * マーカー無しブロックは終端が曖昧なため、本文開始後の最初の空行で打ち切る（控えめに選ぶ）。
+ * 過剰選択でユーザーの後続段落を消すより、過少選択で古い断片が残る方が安全（データを失わない）。
  */
 export function findExistingTranscript(
   lines: string[],
-  key: string,
   anchorLine?: number
 ): ExistingRange | null {
-  // 1) マーカーブロック（キー一致）
-  const open = markOpen(key);
-  const oi = lines.findIndex((l) => l.trim() === open);
-  if (oi !== -1) {
-    const ci = lines.findIndex((l, i) => i > oi && l.trim() === MARK_CLOSE);
-    if (ci !== -1) {
-      let start = oi;
-      let end = ci + 1;
-      // 挿入時に付けた前後の空行も一緒に取り込む（置換後に空行が増殖しないように）
-      if (start > 0 && lines[start - 1].trim() === "") start--;
-      if (end < lines.length && lines[end].trim() === "") end++;
-      return { startLine: start, endLineExclusive: end };
-    }
-  }
+  if (anchorLine == null) return null;
 
-  // 2) 旧ブロック（マーカー無し）: 埋め込み直後のコールアウト
-  if (anchorLine != null) {
-    let i = anchorLine + 1;
+  let i = anchorLine + 1;
+  while (i < lines.length && lines[i].trim() === "") i++;
+
+  // 旧マーカー開始行があれば取り込み、その次の実体（コールアウト）まで進む
+  let markerStart: number | null = null;
+  if (i < lines.length && LEGACY_MARK_OPEN.test(lines[i].trim())) {
+    markerStart = i;
+    i++;
     while (i < lines.length && lines[i].trim() === "") i++;
-    if (i < lines.length && /^>\s*\[!note\]\s*文字起こし/.test(lines[i].trim())) {
-      const start = i;
-      i++;
-      // 本文（見出し行 → 空行 → ### 範囲 → テキスト）を辿る。マーカー無しブロックは終端が曖昧なため、
-      // 本文開始後の最初の空行で打ち切る（＝控えめに選ぶ）。過剰選択でユーザーの後続段落を消すより、
-      // 過少選択で古い断片が残る方が安全（データを失わない）。
-      let seenBody = false;
-      while (i < lines.length) {
-        const t = lines[i].trim();
-        if (/^!\[\[/.test(t)) break; // 次の埋め込み
-        if (/^%%rmr-tx:/.test(t)) break; // 次のマーカーブロック
-        if (/^>\s*\[!/.test(t)) break; // 次のコールアウト
-        if (/^#{1,2}\s/.test(t)) break; // 次の見出し（### は本文内なので対象外）
-        if (t === "") {
-          if (seenBody) break; // 本文の後の最初の空行で終端
-          i++;
-          continue; // 見出し直後の空行（### の前）はスキップ
-        }
-        seenBody = true;
-        i++;
-      }
-      let end = i;
-      while (end > start && lines[end - 1].trim() === "") end--; // 末尾空行を戻す
-      let s = start;
-      if (s > 0 && lines[s - 1].trim() === "") s--; // 先頭側の空行を取り込む
-      return { startLine: s, endLineExclusive: end };
-    }
   }
 
-  return null;
+  if (i >= lines.length || !/^>\s*\[!note\]\s*文字起こし/.test(lines[i].trim())) {
+    return null; // 直後にトランスクリプトは無い
+  }
+
+  let start = markerStart ?? i;
+  i++; // コールアウト見出しの次から本文
+  let seenBody = false;
+  while (i < lines.length) {
+    const t = lines[i].trim();
+    if (t === LEGACY_MARK_CLOSE) {
+      i++; // 旧マーカー終了行も範囲に含めて掃除
+      break;
+    }
+    if (/^!\[\[/.test(t)) break; // 次の埋め込み
+    if (LEGACY_MARK_OPEN.test(t)) break; // 次のブロックのマーカー
+    if (/^>\s*\[!/.test(t)) break; // 次のコールアウト
+    if (/^#{1,2}\s/.test(t)) break; // 次の見出し（### は本文内なので対象外）
+    if (t === "") {
+      if (seenBody) break; // 本文の後の最初の空行で終端
+      i++;
+      continue; // 見出し直後の空行（### の前）はスキップ
+    }
+    seenBody = true;
+    i++;
+  }
+  let end = i;
+  while (end > start && lines[end - 1].trim() === "") end--; // 末尾空行を戻す
+  if (start > 0 && lines[start - 1].trim() === "") start--; // 先頭側の空行を取り込む
+  return { startLine: start, endLineExclusive: end };
 }
 
 export type DupMode = "replace" | "append";
 
+/**
+ * 可視ブロック（buildMarkdown の出力）を先頭空行付きの行配列にする。
+ * 末尾に空行は付けない: 検出（findExistingTranscript）は末尾空行を範囲に含めないため、
+ * 末尾空行を付けると置換のたびに空行が増えてしまう（冪等性のため先頭空行のみ）。
+ */
+function blockLines(md: string): string[] {
+  return ["", ...md.trim().split("\n")];
+}
+
 interface UpsertOptions {
-  /** 埋め込み行（0 始まり）。既存が無いときここの直後へ挿入。未指定なら末尾。 */
+  /** 埋め込み行（0 始まり）。未指定なら embedHint から探す。 */
   anchorLine?: number;
+  /** 埋め込み行を探す手がかり（anchorLine 未指定時）。 */
+  embedHint?: EmbedHint;
   /** 既存検出時の扱い。既定は置換（再文字起こしで上書き）。 */
   dupMode?: DupMode;
-  /** 既存が無くノートを新規作成した場合などに、先頭へ付ける埋め込みリンク（Vault 相対）。 */
+  /** 既存も埋め込みも無いときに、先頭へ付ける埋め込みリンク（Vault 相対）。 */
   prependEmbed?: string | null;
 }
 
 /**
  * ノートへトランスクリプトを冪等に挿入する。
- * 既存（同一キー）があれば dupMode に従い 置換 / 直後へ追記。無ければ埋め込み直後（または末尾）へ挿入。
+ * 同一音声の埋め込み直後に既存があれば dupMode に従い 置換 / 直後へ追記。
+ * 無ければ埋め込み直下（埋め込みも無ければ末尾）へ挿入。
  */
 export async function upsertTranscript(
   app: App,
   note: TFile,
-  key: string,
   md: string,
   opts: UpsertOptions = {}
 ): Promise<void> {
   const dupMode = opts.dupMode ?? "replace";
   const content = await app.vault.read(note);
   const lines = content.split("\n");
-  const existing = findExistingTranscript(lines, key, opts.anchorLine);
-  const block = wrappedBlockLines(md, key);
+  const anchor =
+    opts.anchorLine ??
+    (opts.embedHint ? findEmbedLine(lines, opts.embedHint.rel, opts.embedHint.name) : undefined);
+  const existing = findExistingTranscript(lines, anchor);
+  const block = blockLines(md);
 
   if (existing) {
     if (dupMode === "append") {
@@ -142,7 +145,7 @@ export async function upsertTranscript(
     }
   } else {
     const head = opts.prependEmbed ? ["", wikilinkEmbed(opts.prependEmbed)] : [];
-    const at = opts.anchorLine != null ? opts.anchorLine + 1 : lines.length;
+    const at = anchor != null ? anchor + 1 : lines.length;
     lines.splice(at, 0, ...head, ...block);
   }
 
