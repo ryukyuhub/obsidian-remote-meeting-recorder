@@ -143,8 +143,6 @@ export class RecordingView extends ItemView {
     this.addTransportButton(transport, "rmr-btn-rec", "circle", " 録音", this.recording, () =>
       void this.onRecord()
     );
-    const pauseBtn = this.addTransportButton(transport, "rmr-btn-pause", "pause", "", true);
-    pauseBtn.setAttr("title", "一時停止は今後のバージョンで対応します");
     this.addTransportButton(transport, "rmr-btn-stop", "square", " 停止", !this.recording, () =>
       void this.onStop()
     );
