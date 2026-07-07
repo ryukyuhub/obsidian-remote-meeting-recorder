@@ -17,6 +17,10 @@ export const CONTROL_WINDOW_HTML = `<!doctype html>
       }
       html,
       body {
+        /* height:100% が無いと #pill の calc(100% - 16px) が解決せず、
+           ピルが中身の高さ（システム音声時は停止ボタン=26px）に潰れて
+           上下の余白が消える。ウィンドウ全高を渡してピルを 80px に保つ。 */
+        height: 100%;
         margin: 0;
         padding: 0;
         background: transparent;
@@ -26,6 +30,7 @@ export const CONTROL_WINDOW_HTML = `<!doctype html>
         font-family: -apple-system, system-ui, sans-serif;
       }
       #pill {
+        position: relative;
         margin: 8px;
         height: calc(100% - 16px);
         border-radius: 16px;
@@ -72,19 +77,27 @@ export const CONTROL_WINDOW_HTML = `<!doctype html>
         height: 40px;
       }
       #msg {
-        flex: 1;
-        min-width: 0;
+        /* システム音声時のみ表示。波形の代わりに置くと flex:1 では
+           タイマー領域ぶん右に寄って停止ボタン側の余白が消えるため、
+           ピル全体に対して絶対中央寄せにする（左右の余白を対称に保つ）。 */
+        position: absolute;
+        left: 14px;
+        right: 14px;
         color: #bbb;
         font-size: 12px;
         text-align: center;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
+        pointer-events: none;
         display: none;
       }
       #stop {
         -webkit-app-region: no-drag;
         flex-shrink: 0;
+        /* システム音声時は msg が絶対配置でフロー外になるため、
+           auto マージンで停止ボタンを右端に固定する（波形時は無害）。 */
+        margin-left: auto;
         cursor: pointer;
         width: 26px;
         height: 26px;

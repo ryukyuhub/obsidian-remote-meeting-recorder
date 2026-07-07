@@ -43,7 +43,8 @@ export class ControlWindowManager {
     if (!htmlPath) return false;
 
     const W = 340;
-    const H = 96;
+    // ピル高さ = H - 16（上下マージン8px×2）。H=72 でピル 56px = 上下に程よい余白。
+    const H = 72;
     let x: number | undefined;
     let y: number | undefined;
     try {
@@ -159,10 +160,24 @@ export class ControlWindowManager {
   }
 }
 
-/** 埋め込み HTML を一時ファイルへ書き出してパスを返す。失敗時は null。 */
+/**
+ * 埋め込み HTML を一時ファイルへ書き出してパスを返す。失敗時は null。
+ *
+ * ファイル名は毎回ユニークにする。固定名だと Chromium が file:// を
+ * ディスクキャッシュし、HTML を更新しても旧版の窓が読み込まれてしまうため
+ * （＝CSS 変更が反映されない）。併せて過去の一時ファイルを掃除して蓄積を防ぐ。
+ */
 function writeControlWindowHtml(): string | null {
   try {
-    const p = path.join(os.tmpdir(), "rmr-control-window.html");
+    const dir = os.tmpdir();
+    try {
+      for (const f of fs.readdirSync(dir)) {
+        if (/^rmr-control-window.*\.html$/.test(f)) fs.unlinkSync(path.join(dir, f));
+      }
+    } catch {
+      /* 掃除失敗は無視（本処理には影響しない） */
+    }
+    const p = path.join(dir, `rmr-control-window-${Date.now()}.html`);
     fs.writeFileSync(p, CONTROL_WINDOW_HTML);
     return p;
   } catch {
