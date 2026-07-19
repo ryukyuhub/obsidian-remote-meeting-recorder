@@ -299,10 +299,51 @@ func scaledBitrate(_ base: Int, sampleRate: Int) -> Int {
     return max(32000, v)
 }
 
+/// ノイズゲート（マイク用・AGC 有効時）。入力 RMS が閾値未満（＝無音/環境ノイズ）のとき
+/// 出力ゲインを floor（ほぼ 0）へ落として録音レベルを著しく下げる。閾値超えで素早く開き、
+/// 有音が hold を超えて途切れたら緩やかに閉じる（語尾切れ・チャタリングを避ける）。
+/// 判定は AGC で持ち上げる前の生入力 RMS で行う（AGC と綱引きしないため）。
+final class NoiseGate {
+    static let openRMS: Float = 0.01     // -40 dBFS 以上を「有音」とみなして開く
+    static let floor: Float = 0.0        // 閉時ゲイン（0＝ほぼ無音）
+    static let holdSec: Double = 0.2     // 有音が途切れても開けておく保持時間
+    private var gain: Float = 1.0
+    private var hold: Double = 0
+
+    /// AGC/リミッター適用後の channels に、生入力 RMS で判定したゲートゲインをランプ乗算する。
+    func process(_ channels: [UnsafeMutablePointer<Float>], frames: Int, stride: Int,
+                 sampleRate: Double, inputRMS: Float) {
+        guard frames > 0, !channels.isEmpty else { return }
+        let dt = Double(frames) / sampleRate
+        if inputRMS >= Self.openRMS { hold = Self.holdSec } else { hold = max(0, hold - dt) }
+        let target: Float = hold > 0 ? 1.0 : Self.floor
+        let prev = gain
+        let tau = target > gain ? 0.008 : 0.15   // 開:速い(8ms) / 閉:緩やか(150ms)
+        gain += (target - gain) * Float(1 - exp(-dt / tau))
+        let dg = (gain - prev) / Float(frames)
+        for ch in channels {
+            var g = prev
+            var idx = 0
+            for _ in 0..<frames { ch[idx] *= g; g += dg; idx += stride }
+        }
+    }
+
+    /// interleaved/planar な channels の RMS（ゲート判定用・AGC 前に測る）。
+    static func rms(_ channels: [UnsafeMutablePointer<Float>], frames: Int, stride: Int) -> Float {
+        guard frames > 0, !channels.isEmpty else { return 0 }
+        var sum: Float = 0
+        for ch in channels {
+            var idx = 0
+            for _ in 0..<frames { let v = ch[idx]; sum += v * v; idx += stride }
+        }
+        return (sum / Float(frames * channels.count)).squareRoot()
+    }
+}
+
 /// 1 つの音声ソース（system もしくは microphone）を AAC .m4a へ書き出す箱。
 /// 最初のサンプルが届いた時点で実フォーマット(ASBD)からライタを遅延生成する。
 /// agc=true なら Float32 PCM チャンクに AGC+リミッターを適用してから書き出す
-/// （対象外フォーマットは素通し）。
+/// （対象外フォーマットは素通し）。gate=true（マイク）はさらにノイズゲートを掛ける。
 final class WriterBox {
     let path: String
     let label: String                 // "system" / "microphone"
@@ -313,12 +354,14 @@ final class WriterBox {
     private var failed = false
     private let agc: AGCProcessor?
     private let limiter: StreamingLimiter?
+    private let noiseGate: NoiseGate?  // マイク（gate=true）かつ AGC 有効時のみ
 
-    init(path: String, label: String, agc: Bool) {
+    init(path: String, label: String, agc: Bool, gate: Bool = false) {
         self.path = path
         self.label = label
         self.agc = agc ? AGCProcessor() : nil
         self.limiter = agc ? StreamingLimiter() : nil
+        self.noiseGate = (agc && gate) ? NoiseGate() : nil
     }
 
     /// サンプルバッファを追記する（必要なら初回にライタ生成）。
@@ -365,8 +408,12 @@ final class WriterBox {
                         chans.append(p)
                     }
                 }
+                // ノイズゲート判定用に AGC 前の生 RMS を測る（マイクのみ）。
+                let rawRMS = self.noiseGate != nil ? NoiseGate.rms(chans, frames: frames, stride: stride) : 0
                 agc.process(chans, frames: frames, stride: stride, sampleRate: sr)
                 limiter.process(chans, frames: frames, stride: stride, sampleRate: sr)
+                // 無音（生入力が閾値未満）ならゲートで出力をほぼ 0 まで落とす。
+                self.noiseGate?.process(chans, frames: frames, stride: stride, sampleRate: sr, inputRMS: rawRMS)
 
                 var timing = CMSampleTimingInfo(
                     duration: CMTime(value: 1, timescale: CMTimeScale(sr)),
@@ -861,11 +908,12 @@ final class Capture {
         if opt.source == "both" {
             let base = (opt.out as NSString).deletingPathExtension
             sysBox = WriterBox(path: base + ".sys.m4a", label: "system", agc: opt.agc)
-            micBox = WriterBox(path: base + ".mic.m4a", label: "microphone", agc: opt.agc)
+            // マイクは AGC 有効時にノイズゲート（無音を著しく減衰）を掛ける。
+            micBox = WriterBox(path: base + ".mic.m4a", label: "microphone", agc: opt.agc, gate: true)
         } else if opt.source == "system" {
             sysBox = WriterBox(path: opt.out, label: "system", agc: opt.agc)
         } else { // mic
-            micBox = WriterBox(path: opt.out, label: "microphone", agc: opt.agc)
+            micBox = WriterBox(path: opt.out, label: "microphone", agc: opt.agc, gate: true)
         }
     }
 
