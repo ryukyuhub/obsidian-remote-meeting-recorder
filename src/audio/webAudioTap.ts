@@ -13,10 +13,7 @@ export class WebAudioTap {
 
   /** 指定デバイス（省略時は既定）でタップ開始。monitor=true で試聴も繋ぐ。 */
   async start(deviceId?: string, monitor = false): Promise<void> {
-    this.stream = await navigator.mediaDevices.getUserMedia({
-      audio: deviceId ? { deviceId: { exact: deviceId } } : true,
-      video: false,
-    });
+    this.stream = await this.acquire(deviceId);
     this.audioCtx = new AudioContext();
     this.source = this.audioCtx.createMediaStreamSource(this.stream);
     this.analyser = this.audioCtx.createAnalyser();
@@ -24,6 +21,26 @@ export class WebAudioTap {
     this.data = new Uint8Array(new ArrayBuffer(this.analyser.frequencyBinCount));
     this.source.connect(this.analyser);
     if (monitor) this.setMonitor(true);
+  }
+
+  /**
+   * 表示用タップのマイクを取得する。exact 指定が通らなければ既定入力へフォールバックする。
+   * macOS では micDevice が CoreAudio UID（Chromium の deviceId とは別名前空間）なので
+   * exact 指定は OverconstrainedError になる。だが録音中は sysrec が対象デバイスを既定入力へ
+   * 切替えているため、既定入力（audio:true）でタップすればメーター/試聴は対象デバイスのものになる。
+   */
+  private async acquire(deviceId?: string): Promise<MediaStream> {
+    try {
+      return await navigator.mediaDevices.getUserMedia({
+        audio: deviceId ? { deviceId: { exact: deviceId } } : true,
+        video: false,
+      });
+    } catch (e) {
+      if (deviceId) {
+        return await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      }
+      throw e;
+    }
   }
 
   /** モニター（入力の試聴）オン/オフ。 */

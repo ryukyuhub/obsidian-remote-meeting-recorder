@@ -476,6 +476,62 @@ func audioDeviceID(forUID uid: String) -> AudioDeviceID? {
     return nil
 }
 
+/// 入力デバイスの仮想フォーマット(ASBD)を取得する（IOProc が渡す ABL のフォーマット）。
+/// プロパティの正規の所在＝最初の入力ストリームの VirtualFormat をまず引き、
+/// 取れなければデバイスへ input scope で問い合わせる（best-effort）。
+func inputVirtualFormat(forDevice devID: AudioDeviceID) -> AudioStreamBasicDescription? {
+    var asbd = AudioStreamBasicDescription()
+    // 1) 最初の入力ストリームの VirtualFormat
+    var sAddr = AudioObjectPropertyAddress(
+        mSelector: kAudioDevicePropertyStreams,
+        mScope: kAudioObjectPropertyScopeInput, mElement: kAudioObjectPropertyElementMain)
+    var ssz = UInt32(0)
+    if AudioObjectGetPropertyDataSize(devID, &sAddr, 0, nil, &ssz) == noErr, ssz > 0 {
+        let n = Int(ssz) / MemoryLayout<AudioStreamID>.size
+        var streams = [AudioStreamID](repeating: 0, count: n)
+        if AudioObjectGetPropertyData(devID, &sAddr, 0, nil, &ssz, &streams) == noErr,
+           let stream = streams.first {
+            var fAddr = AudioObjectPropertyAddress(
+                mSelector: kAudioStreamPropertyVirtualFormat,
+                mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+            var fsz = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+            if AudioObjectGetPropertyData(stream, &fAddr, 0, nil, &fsz, &asbd) == noErr,
+               asbd.mSampleRate > 0 { return asbd }
+        }
+    }
+    // 2) フォールバック: デバイスへ input scope で問い合わせ
+    var dAddr = AudioObjectPropertyAddress(
+        mSelector: kAudioStreamPropertyVirtualFormat,
+        mScope: kAudioObjectPropertyScopeInput, mElement: kAudioObjectPropertyElementMain)
+    var dsz = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+    if AudioObjectGetPropertyData(devID, &dAddr, 0, nil, &dsz, &asbd) == noErr,
+       asbd.mSampleRate > 0 { return asbd }
+    return nil
+}
+
+/// 現在のシステム既定入力デバイス ID。
+func currentDefaultInputDevice() -> AudioDeviceID {
+    let sys = AudioObjectID(kAudioObjectSystemObject)
+    var dev = AudioDeviceID(kAudioObjectUnknown)
+    var sz = UInt32(MemoryLayout<AudioDeviceID>.size)
+    var a = AudioObjectPropertyAddress(
+        mSelector: kAudioHardwarePropertyDefaultInputDevice,
+        mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+    AudioObjectGetPropertyData(sys, &a, 0, nil, &sz, &dev)
+    return dev
+}
+
+/// システム既定入力デバイスを設定（成功で true）。
+func setDefaultInputDevice(_ dev: AudioDeviceID) -> Bool {
+    let sys = AudioObjectID(kAudioObjectSystemObject)
+    var d = dev
+    var a = AudioObjectPropertyAddress(
+        mSelector: kAudioHardwarePropertyDefaultInputDevice,
+        mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+    return AudioObjectSetPropertyData(
+        sys, &a, 0, nil, UInt32(MemoryLayout<AudioDeviceID>.size), &d) == noErr
+}
+
 /// システム音声を Core Audio プロセスタップで取得（画面キャプチャなし）。onBuffer に native PCM を渡す。
 final class TapCapturer {
     private let onBuffer: (AVAudioPCMBuffer) -> Void
@@ -587,23 +643,69 @@ final class TapCapturer {
     }
 }
 
-/// マイクを AVAudioEngine で取得。onBuffer に native PCM を渡す。
+/// マイクを取得して onBuffer に native PCM を渡す。
+/// - 既定入力（--mic-device なし）… AVAudioEngine の inputNode をタップ（安定・従来どおり）。
+/// - 特定デバイス指定 … その入力デバイスを「一時的にシステム既定入力へ切替」えてから
+///   CoreAudio IOProc を張って取得し、停止時に元の既定入力へ復元する。
+///
+/// なぜ既定入力へ切替えるのか（Issue #1・実機検証で確定）:
+///   - AVAudioEngine の kAudioOutputUnitProperty_CurrentDevice でデバイスを差し替える方式は、
+///     切替は効くのにタップへバッファが流れず無音になる。
+///   - 対象デバイスへ生 IOProc を張る方式は CLI では録れるが、Obsidian(Electron) から
+///     spawn された文脈では、対象が「非既定＝非アクティブ」だと起動時にシステム音タップごと
+///     固まって system/mic 両方が無音になる（「規定以外だと両方録れない」の正体）。
+///   - 対象が「既定入力」のときは Obsidian でも確実に録れる。そこで録音の間だけ既定入力を
+///     対象デバイスへ切替え、確実な経路で録って、停止時に必ず戻す。
 final class MicCapturer {
     private let engine = AVAudioEngine()
     private let onBuffer: (AVAudioPCMBuffer) -> Void
     private var installed = false
+    // 特定デバイス用 IOProc 経路の保持
+    private var procDeviceID = AudioObjectID(kAudioObjectUnknown)
+    private var ioProc: AudioDeviceIOProcID?
+    private var deviceFormat: AVAudioFormat?
+    // 一時的に既定入力を切替えた場合の復元先（nil＝切替えていない）
+    private var savedDefaultInput: AudioDeviceID?
     init(onBuffer: @escaping (AVAudioPCMBuffer) -> Void) { self.onBuffer = onBuffer }
 
     func start(micDevice: String?) throws {
-        let input = engine.inputNode
-        // 特定マイク指定（best-effort）。解決できなければ既定入力にフォールバック。
-        if let uid = micDevice, let devID = audioDeviceID(forUID: uid), let unit = input.audioUnit {
-            var dev = devID
-            let st = AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice,
-                                          kAudioUnitScope_Global, 0, &dev,
-                                          UInt32(MemoryLayout<AudioDeviceID>.size))
-            if st != noErr { logErr("マイクデバイス指定に失敗（既定入力を使用）: \(st)") }
+        // 特定マイク指定があり解決できたら、対象を一時的に既定入力へ切替えてから IOProc で取得する。
+        if let uid = micDevice, let devID = audioDeviceID(forUID: uid) {
+            // 非既定デバイスは Obsidian 文脈で起動時に固まるため、録音の間だけ既定入力を対象へ切替える。
+            let prev = currentDefaultInputDevice()
+            if prev != devID {
+                if setDefaultInputDevice(devID) {
+                    savedDefaultInput = prev
+                    logErr("マイク: 対象デバイスを録音中のみ既定入力へ切替（\(prev) → \(devID)）")
+                } else {
+                    logErr("マイク: 既定入力の一時切替に失敗（対象デバイスをそのまま試行）")
+                }
+            }
+            do {
+                try startDeviceProc(devID)
+                return
+            } catch CaptureError.msg(let m) {
+                // 対象デバイスで開始できなかった → 既定入力を戻し、録音自体は失わないよう既定入力で録る。
+                restoreDefaultInput()
+                logErr("マイク: 特定デバイスの取得に失敗（既定入力へフォールバック）: \(m)")
+            }
+        } else if micDevice != nil {
+            logErr("マイク: 指定 UID を解決できませんでした（既定入力を使用）: \(micDevice ?? "")")
         }
+        try startEngineDefault()
+    }
+
+    /// 一時切替した既定入力を元へ戻す（多重呼び出し安全）。
+    private func restoreDefaultInput() {
+        guard let prev = savedDefaultInput else { return }
+        savedDefaultInput = nil
+        _ = setDefaultInputDevice(prev)
+        logErr("マイク: 既定入力を復元（\(prev)）")
+    }
+
+    /// 既定入力を AVAudioEngine でタップ（従来経路・安定）。
+    private func startEngineDefault() throws {
+        let input = engine.inputNode
         let format = input.outputFormat(forBus: 0)
         guard format.channelCount > 0, format.sampleRate > 0 else {
             throw CaptureError.msg("マイク入力フォーマットが不正です（入力デバイスを確認してください）。")
@@ -619,9 +721,48 @@ final class MicCapturer {
         }
     }
 
+    /// 特定デバイスを CoreAudio IOProc で直接取得（TapCapturer と同じ方式）。
+    private func startDeviceProc(_ devID: AudioDeviceID) throws {
+        guard var asbd = inputVirtualFormat(forDevice: devID),
+              let fmt = AVAudioFormat(streamDescription: &asbd) else {
+            throw CaptureError.msg("入力デバイスのフォーマットを取得できませんでした。")
+        }
+        deviceFormat = fmt
+        // フレーム数はデバイスの bytesPerFrame から算出（Float32/Int16 等どの LPCM でも正しく数える）。
+        let bytesPerFrame = max(1, Int(asbd.mBytesPerFrame))
+        let block: AudioDeviceIOBlock = { [weak self] _, inInputData, _, _, _ in
+            guard let self, let fmt = self.deviceFormat else { return }
+            let abl = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inInputData))
+            guard abl.count >= 1, abl[0].mData != nil else { return }
+            let frames = AVAudioFrameCount(Int(abl[0].mDataByteSize) / bytesPerFrame)
+            guard frames > 0, let pcm = copyToPCMBuffer(abl, format: fmt, frames: frames) else { return }
+            self.onBuffer(pcm)
+        }
+        var proc: AudioDeviceIOProcID?
+        let cst = AudioDeviceCreateIOProcIDWithBlock(&proc, devID, nil, block)
+        guard cst == noErr, let p = proc else {
+            throw CaptureError.msg("マイク IOProc を作成できませんでした（st=\(cst)）。")
+        }
+        let sst = AudioDeviceStart(devID, p)
+        guard sst == noErr else {
+            AudioDeviceDestroyIOProcID(devID, p)
+            throw CaptureError.msg("マイクの取得を開始できませんでした（st=\(sst)）。")
+        }
+        ioProc = p; procDeviceID = devID
+    }
+
     func stop() {
+        // IOProc 経路（停止 → Destroy の順）。
+        if let p = ioProc {
+            AudioDeviceStop(procDeviceID, p)
+            AudioDeviceDestroyIOProcID(procDeviceID, p)
+            ioProc = nil
+        }
+        // AVAudioEngine 経路。
         if installed { engine.inputNode.removeTap(onBus: 0); installed = false }
         engine.stop()
+        // 一時切替した既定入力を必ず元へ戻す。
+        restoreDefaultInput()
     }
 }
 
@@ -718,6 +859,8 @@ final class Capture {
     }
 
     private func finishAndExit(code: Int32) {
+        // 各ソースの取得フレーム数（0 なら無音＝取得不成立。障害切り分け用に残す）。
+        logErr("録音終了: source=\(opt.source) system=\(sysFrames)フレーム mic=\(micFrames)フレーム")
         let sys = sysBox?.finish()
         let mic = micBox?.finish()
         var ev: [String: Any] = ["event": "stopped", "source": opt.source]

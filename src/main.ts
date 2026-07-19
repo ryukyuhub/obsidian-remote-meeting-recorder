@@ -26,6 +26,7 @@ import { restoreInProgressSessions } from "./recorder/restore";
 import { SessionWatcher } from "./recorder/watch";
 import { insertEmbed, computeVaultRelative } from "./ui/embed";
 import { listMicDevices, type MicDevice } from "./recorder/devices";
+import { listWebMicDevices } from "./audio/webDevices";
 import { linkToDailyNote } from "./ui/dailyNote";
 import { rotateLogs, readSessionMeta } from "./state/sessionStore";
 import { sessionPaths } from "./state/paths";
@@ -553,8 +554,12 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
     }
   }
 
-  /** マイク入力デバイス一覧（sysrec list-devices）。 */
+  /**
+   * マイク入力デバイス一覧。
+   * macOS は sysrec `list-devices`、Windows はレンダラの enumerateDevices（Issue #1）。
+   */
   async listMicDevices(): Promise<MicDevice[]> {
+    if (process.platform === "win32") return listWebMicDevices();
     return listMicDevices(this.buildContext().resolveBinPath());
   }
 

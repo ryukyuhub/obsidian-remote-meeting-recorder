@@ -168,7 +168,7 @@ export class RMRSettingTab extends PluginSettingTab {
       (v) => (s.defaultAgc = v)
     );
 
-    // 入力デバイス（sysrec list-devices で非同期に populate）
+    // 入力デバイス（macOS=sysrec list-devices / Windows=enumerateDevices で非同期に populate）
     const deviceSetting = new Setting(containerEl)
       .setName("既定の入力デバイス（マイク）")
       .setDesc("録音ビューの初期値。空欄はシステム既定のマイク。");
