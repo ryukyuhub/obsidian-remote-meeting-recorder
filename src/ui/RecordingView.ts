@@ -237,7 +237,7 @@ export class RecordingView extends ItemView {
     const opts = this.addRow(panel, "Source", "rmr-radios");
     const active = this.plugin.activeRecording;
     const current = active ? active.source : this.vSource;
-    (["mic", "system", "both"] as RecorderSource[]).forEach((src) => {
+    (["both", "system", "mic"] as RecorderSource[]).forEach((src) => {
       const lbl = opts.createEl("label", { cls: "rmr-radio" });
       const input = lbl.createEl("input", { attr: { type: "radio", name: "rmr-source" } });
       input.checked = current === src;
