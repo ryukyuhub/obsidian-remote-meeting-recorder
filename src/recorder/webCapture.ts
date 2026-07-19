@@ -72,8 +72,17 @@ export interface WebRecorderOptions {
   mimeType: string;
   /** 録音サンプルレート（Hz）。省略時は AudioContext 既定（通常デバイス値）。 */
   sampleRate?: number;
+  /** 手動ミキサー（Manual モード）: ソース別ゲイン(dB)を適用する。 */
+  manualMix?: boolean;
+  systemGainDb?: number;
+  micGainDb?: number;
   /** 予期しない終了（トラック切断・録音エラー・onunload 以外の停止）で呼ばれる。 */
   onTerminated?: () => void;
+}
+
+/** dB → 線形ゲイン。 */
+function dbToLinear(db: number): number {
+  return Math.pow(10, db / 20);
 }
 
 /**
@@ -86,13 +95,19 @@ export class WebRecorder {
   private readonly micDevice?: string;
   private readonly mimeType: string;
   private readonly sampleRate?: number;
+  private readonly manualMix: boolean;
   private readonly onTerminated?: () => void;
 
   private systemStream: MediaStream | null = null;
   private micStream: MediaStream | null = null;
   private audioCtx: AudioContext | null = null;
-  private analyser: AnalyserNode | null = null;
-  private analyserData: Uint8Array<ArrayBuffer> | null = null;
+  // ソース別ゲイン（手動ミキサーで録音中にライブ調整）と、ソース別の表示用 Analyser。
+  private sysGain: GainNode | null = null;
+  private micGain: GainNode | null = null;
+  private sysAnalyser: AnalyserNode | null = null;
+  private micAnalyser: AnalyserNode | null = null;
+  private sysData: Uint8Array<ArrayBuffer> | null = null;
+  private micData: Uint8Array<ArrayBuffer> | null = null;
   private recorder: MediaRecorder | null = null;
   private fileStream: fs.WriteStream | null = null;
 
@@ -108,8 +123,14 @@ export class WebRecorder {
     this.micDevice = o.micDevice;
     this.mimeType = o.mimeType;
     this.sampleRate = o.sampleRate;
+    this.manualMix = !!o.manualMix;
+    this.initSysGainDb = o.systemGainDb ?? 0;
+    this.initMicGainDb = o.micGainDb ?? 0;
     this.onTerminated = o.onTerminated;
   }
+
+  private readonly initSysGainDb: number;
+  private readonly initMicGainDb: number;
 
   /** 録音開始。ストリーム取得・ミックス・MediaRecorder 起動まで。失敗時は throw（呼び出し側で StartError 化）。 */
   async start(): Promise<void> {
@@ -129,17 +150,29 @@ export class WebRecorder {
     // ファイルサイズはサンプルレートではなくビットレート（下の audioBitsPerSecond）で縮める。
     this.audioCtx = new AudioContext();
     const dest = this.audioCtx.createMediaStreamDestination();
-    this.analyser = this.audioCtx.createAnalyser();
-    this.analyser.fftSize = 256;
-    this.analyserData = new Uint8Array(new ArrayBuffer(this.analyser.frequencyBinCount));
-    const connect = (s: MediaStream | null) => {
-      if (!s || s.getAudioTracks().length === 0) return;
-      const node = this.audioCtx!.createMediaStreamSource(new MediaStream(s.getAudioTracks()));
-      node.connect(dest);
-      node.connect(this.analyser!);
+    // ソースごとに source → gain → dest とし、gain の後段に Analyser を分岐する
+    // （メーターは post-gain＝録音される実レベルを反映）。手動ミキサー時は初期ゲインを適用。
+    const makeAnalyser = (): [AnalyserNode, Uint8Array<ArrayBuffer>] => {
+      const a = this.audioCtx!.createAnalyser();
+      a.fftSize = 256;
+      return [a, new Uint8Array(new ArrayBuffer(a.frequencyBinCount))];
     };
-    connect(this.systemStream);
-    connect(this.micStream);
+    const connectSource = (
+      s: MediaStream | null,
+      initialDb: number
+    ): [GainNode | null, AnalyserNode | null, Uint8Array<ArrayBuffer> | null] => {
+      if (!s || s.getAudioTracks().length === 0) return [null, null, null];
+      const node = this.audioCtx!.createMediaStreamSource(new MediaStream(s.getAudioTracks()));
+      const gain = this.audioCtx!.createGain();
+      gain.gain.value = this.manualMix ? dbToLinear(initialDb) : 1;
+      const [analyser, data] = makeAnalyser();
+      node.connect(gain);
+      gain.connect(dest);
+      gain.connect(analyser);
+      return [gain, analyser, data];
+    };
+    [this.sysGain, this.sysAnalyser, this.sysData] = connectSource(this.systemStream, this.initSysGainDb);
+    [this.micGain, this.micAnalyser, this.micData] = connectSource(this.micStream, this.initMicGainDb);
 
     // 逐次追記の出力先。
     this.fileStream = fs.createWriteStream(this.out);
@@ -218,13 +251,38 @@ export class WebRecorder {
     return { bytes: this.finalBytes };
   }
 
-  /** 表示用の入力レベル（0..1）。周波数ビンの平均。 */
-  getLevel(): number {
-    if (!this.analyser || !this.analyserData) return 0;
-    this.analyser.getByteFrequencyData(this.analyserData);
+  /** Analyser から周波数ビン平均で 0..1 のレベルを読む。 */
+  private levelOf(analyser: AnalyserNode | null, data: Uint8Array<ArrayBuffer> | null): number {
+    if (!analyser || !data) return 0;
+    analyser.getByteFrequencyData(data);
     let sum = 0;
-    for (let i = 0; i < this.analyserData.length; i++) sum += this.analyserData[i];
-    return sum / this.analyserData.length / 255;
+    for (let i = 0; i < data.length; i++) sum += data[i];
+    return sum / data.length / 255;
+  }
+
+  /** ソース別レベル（0..1）。system/mic の 2 メーター用。 */
+  getSourceLevels(): { system: number; mic: number } {
+    return {
+      system: this.levelOf(this.sysAnalyser, this.sysData),
+      mic: this.levelOf(this.micAnalyser, this.micData),
+    };
+  }
+
+  /** 表示用の入力レベル（0..1）。従来 API 互換（mic を返す。mic 無しなら system）。 */
+  getLevel(): number {
+    return this.micAnalyser
+      ? this.levelOf(this.micAnalyser, this.micData)
+      : this.levelOf(this.sysAnalyser, this.sysData);
+  }
+
+  /** 手動ミキサー: システム音のゲイン(dB)を録音中にライブ変更。 */
+  setSystemGain(db: number): void {
+    if (this.sysGain) this.sysGain.gain.value = dbToLinear(db);
+  }
+
+  /** 手動ミキサー: マイクのゲイン(dB)を録音中にライブ変更。 */
+  setMicGain(db: number): void {
+    if (this.micGain) this.micGain.gain.value = dbToLinear(db);
   }
 
   // --- 内部 ---------------------------------------------------------------

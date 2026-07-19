@@ -424,12 +424,12 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
    * （Windows の per-source 分離は後続。現状は system=0 / mic=混合レベルにフォールバック。）
    */
   getSourceLevels(): { system: number; mic: number } {
-    if (this.levelPoller) return this.levelPoller.levels();
     const id = this.activeRecording?.sessionId;
     if (id) {
       const rec = this.webRecorders.get(id);
-      if (rec) return { system: 0, mic: rec.getLevel() };
+      if (rec) return rec.getSourceLevels(); // Windows: WebRecorder のソース別 Analyser
     }
+    if (this.levelPoller) return this.levelPoller.levels(); // macOS: sysrec の level ファイル
     return { system: 0, mic: 0 };
   }
 
@@ -450,10 +450,18 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
     this.writeMixerControl();
   }
 
-  /** 現在のミキサーゲイン(dB)を control ファイルへ書く（sysrec が polling してライブ適用）。 */
+  /** 現在のミキサーゲイン(dB)をライブ適用する。 */
   private writeMixerControl(): void {
     const id = this.activeRecording?.sessionId;
     if (!id) return;
+    // Windows: WebRecorder の GainNode に直接反映（sysrec は無い）。
+    const rec = this.webRecorders.get(id);
+    if (rec) {
+      rec.setSystemGain(this.mixerGain.systemDb);
+      rec.setMicGain(this.mixerGain.micDb);
+      return;
+    }
+    // macOS: control ファイルへ書く（sysrec が polling してライブ適用）。
     try {
       const control = sessionPaths(this.buildContext().paths, id).control;
       atomicWriteFile(

@@ -37,6 +37,9 @@ export async function startWebRecording(
     micDevice: o.micDevice,
     mimeType: fmt.mimeType,
     sampleRate: o.sampleRate ?? ctx.settings.sampleRate,
+    manualMix: o.manualMix,
+    systemGainDb: o.systemGainDb,
+    micGainDb: o.micGainDb,
     onTerminated: () => onTerminated(id),
   });
 
@@ -57,7 +60,8 @@ export async function startWebRecording(
     pid: process.pid, // 参考値。win32 では liveness 判定に使わない（watcher/restore が platform で分岐）。
     platform: "win32",
     source: o.source,
-    agc: o.agc ? "on" : "off",
+    agc: o.manualMix ? "off" : o.agc ? "on" : "off",
+    manualMix: o.manualMix,
     out,
     bin: "",
     startedAt: Date.now(),
