@@ -19,6 +19,8 @@ export interface RMRSettings {
   defaultAgc: boolean;
   /** マイクのノイズゲート閾値（AGC 有効時）。"off" もしくは dBFS 文字列（例 "-40"）。 */
   micNoiseGate: string;
+  /** システム音のノイズゲート閾値（AGC 有効時）。既定 "off"（相手の声を切らないため）。 */
+  sysNoiseGate: string;
   /** 手動ミキサー（Manual モード）を既定にするか。AGC と排他。 */
   enableManualMixer: boolean;
   /** 手動ミキサーの初期ゲイン（dB） */
@@ -48,6 +50,7 @@ export const DEFAULT_SETTINGS: RMRSettings = {
   channels: 1,
   defaultAgc: true,
   micNoiseGate: "-40",
+  sysNoiseGate: "off",
   enableManualMixer: false,
   defaultSystemGainDb: 0,
   defaultMicGainDb: 0,
@@ -193,6 +196,21 @@ export class RMRSettingTab extends PluginSettingTab {
       ],
       () => s.micNoiseGate,
       (v) => (s.micNoiseGate = v)
+    );
+
+    this.bindDropdown(
+      "システム音のノイズゲート（無音カット）",
+      "Auto gain 有効時、システム音（相手の声・共有音）がこの音量以下なら「無音」とみなして下げます。" +
+        "相手の小声や間（沈黙）まで切ってしまう恐れがあるため既定はオフ推奨。回線ノイズ/ハムを抑えたいときだけ弱めから。",
+      [
+        ["off", "オフ（カットしない・推奨）"],
+        ["-48", "弱（-48 dBFS）"],
+        ["-40", "標準（-40 dBFS）"],
+        ["-34", "強（-34 dBFS）"],
+        ["-28", "最強（-28 dBFS）"],
+      ],
+      () => s.sysNoiseGate,
+      (v) => (s.sysNoiseGate = v)
     );
 
     this.bindToggle(

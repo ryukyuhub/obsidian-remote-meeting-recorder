@@ -90,6 +90,9 @@ struct Options {
     // マイクのノイズゲート（AGC 有効時）。micGate=false でオフ。閾値は dBFS。
     var micGate: Bool = true
     var micGateDb: Double = -40
+    // システム音のノイズゲート（AGC 有効時）。既定オフ（相手の声を切らないため）。
+    var sysGate: Bool = false
+    var sysGateDb: Double = -40
 }
 
 func parseRecordArgs(_ argv: [String]) -> Options {
@@ -115,6 +118,10 @@ func parseRecordArgs(_ argv: [String]) -> Options {
             let v = next()
             if v == "off" { o.micGate = false }
             else if let db = Double(v) { o.micGate = true; o.micGateDb = db }
+        case "--sys-gate":
+            let v = next()
+            if v == "off" { o.sysGate = false }
+            else if let db = Double(v) { o.sysGate = true; o.sysGateDb = db }
         case "--tmp": _ = next() // 予約（現状未使用）
         default: break
         }
@@ -915,14 +922,17 @@ final class Capture {
         self.sysGain = ManualGain(db: opt.systemGainDb)
         self.micGain = ManualGain(db: opt.micGainDb)
         // 出力先パスの用意（both は中間 2 ファイル）
+        // AGC 有効時、ソース別にノイズゲート（無音を著しく減衰）を掛ける。閾値・オンオフは設定で可変。
+        // マイクは既定オン(-40dBFS)、システム音は既定オフ（相手の声を切らないため）。
         if opt.source == "both" {
             let base = (opt.out as NSString).deletingPathExtension
-            sysBox = WriterBox(path: base + ".sys.m4a", label: "system", agc: opt.agc)
-            // マイクは AGC 有効時にノイズゲート（無音を著しく減衰）を掛ける。閾値は設定で可変。
+            sysBox = WriterBox(path: base + ".sys.m4a", label: "system", agc: opt.agc,
+                               gate: opt.sysGate, gateDb: opt.sysGateDb)
             micBox = WriterBox(path: base + ".mic.m4a", label: "microphone", agc: opt.agc,
                                gate: opt.micGate, gateDb: opt.micGateDb)
         } else if opt.source == "system" {
-            sysBox = WriterBox(path: opt.out, label: "system", agc: opt.agc)
+            sysBox = WriterBox(path: opt.out, label: "system", agc: opt.agc,
+                               gate: opt.sysGate, gateDb: opt.sysGateDb)
         } else { // mic
             micBox = WriterBox(path: opt.out, label: "microphone", agc: opt.agc,
                                gate: opt.micGate, gateDb: opt.micGateDb)
