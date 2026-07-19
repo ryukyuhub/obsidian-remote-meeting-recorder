@@ -740,9 +740,13 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
         source: this.activeRecording.source,
         accent,
         label: this.activeRecording.label ?? "録音中",
+        manual: this.activeRecording.manualMix,
+        systemGainDb: this.mixerGain.systemDb,
+        micGainDb: this.mixerGain.micDb,
       },
       () => void this.stopActiveRecording(),
-      () => this.getMicLevel()
+      () => this.getSourceLevels(),
+      (which, db) => (which === "system" ? this.setSystemGain(db) : this.setMicGain(db))
     );
     if (!ok) new Notice("ミニ制御ウィンドウを開けませんでした（この環境では未対応）。");
   }

@@ -10,12 +10,23 @@ export interface ControlWindowConfig {
   source: string;
   accent: string;
   label: string;
+  /** 手動ミキサー（Manual モード）: ソース別フェーダーを出す。 */
+  manual: boolean;
+  systemGainDb: number;
+  micGainDb: number;
+}
+
+/** ソース別レベル（0..1）。 */
+export interface SourceLevels {
+  system: number;
+  mic: number;
 }
 
 const CH_STOP = "rmr:stop";
 const CH_LEVEL = "rmr:level";
 const CH_TICK = "rmr:tick";
 const CH_CONFIG = "rmr:config";
+const CH_GAIN = "rmr:gain"; // 子 → 親（フェーダー操作）
 
 /**
  * 常時前面ミニ制御ウィンドウ（設計書 §9.4・§14.3）。
@@ -27,12 +38,14 @@ export class ControlWindowManager {
   private win: any = null;
   private ipcMain: any = null;
   private stopHandler: ((...args: any[]) => void) | null = null;
+  private gainHandler: ((...args: any[]) => void) | null = null;
   private levelTimer: number | null = null;
 
   open(
     config: ControlWindowConfig,
     onStop: () => void,
-    getLevel: () => number
+    getSourceLevels: () => SourceLevels,
+    onGain: (which: "system" | "mic", db: number) => void
   ): boolean {
     const remote = getElectronRemote() as any;
     if (!remote?.BrowserWindow) return false;
@@ -42,9 +55,11 @@ export class ControlWindowManager {
     const htmlPath = writeControlWindowHtml();
     if (!htmlPath) return false;
 
-    const W = 340;
-    // ピル高さ = H - 16（上下マージン8px×2）。H=72 でピル 56px = 上下に程よい余白。
-    const H = 72;
+    const W = 420;
+    // 縦型ピル: 上段(録音ドット+時間+停止)=40 + ソース行(ラベル+フェーダー+メーター)=34×行数
+    // + 上下マージン16。both は 2 行、単体は 1 行。
+    const rows = config.source === "both" ? 2 : 1;
+    const H = 40 + rows * 34 + 16;
     let x: number | undefined;
     let y: number | undefined;
     try {
@@ -94,19 +109,25 @@ export class ControlWindowManager {
     this.win.loadFile(htmlPath);
     this.win.webContents.on("did-finish-load", () => this.safeSend(CH_CONFIG, config));
 
-    // 停止（子 → 親）: ipcMain 経由で親レンダラのハンドラを呼ぶ
+    // 停止・ゲイン操作（子 → 親）: ipcMain 経由で親レンダラのハンドラを呼ぶ
     this.ipcMain = remote.ipcMain ?? null;
     if (this.ipcMain) {
       this.stopHandler = () => onStop();
+      this.gainHandler = (_e: unknown, msg: { which?: string; db?: number }) => {
+        if ((msg?.which === "system" || msg?.which === "mic") && typeof msg.db === "number") {
+          onGain(msg.which, msg.db);
+        }
+      };
       try {
         this.ipcMain.on(CH_STOP, this.stopHandler);
+        this.ipcMain.on(CH_GAIN, this.gainHandler);
       } catch {
         /* noop */
       }
     }
 
-    // レベル送出（親 → 子・~16fps）
-    this.levelTimer = window.setInterval(() => this.safeSend(CH_LEVEL, getLevel()), 60);
+    // ソース別レベル送出（親 → 子・~16fps）
+    this.levelTimer = window.setInterval(() => this.safeSend(CH_LEVEL, getSourceLevels()), 60);
 
     this.win.on("closed", () => this.cleanup());
     return true;
@@ -148,14 +169,16 @@ export class ControlWindowManager {
       window.clearInterval(this.levelTimer);
       this.levelTimer = null;
     }
-    if (this.ipcMain && this.stopHandler) {
+    if (this.ipcMain) {
       try {
-        this.ipcMain.removeListener(CH_STOP, this.stopHandler);
+        if (this.stopHandler) this.ipcMain.removeListener(CH_STOP, this.stopHandler);
+        if (this.gainHandler) this.ipcMain.removeListener(CH_GAIN, this.gainHandler);
       } catch {
         /* noop */
       }
     }
     this.stopHandler = null;
+    this.gainHandler = null;
     this.win = null;
   }
 }
