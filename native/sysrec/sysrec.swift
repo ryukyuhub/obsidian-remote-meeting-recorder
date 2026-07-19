@@ -111,13 +111,20 @@ func parseRecordArgs(_ argv: [String]) -> Options {
 /// ストリーミング AGC（自動レベル調整）。1 ソースぶんの状態を持ち、録音時は
 /// キャプチャチャンクごと、ミックス時はトラックをチャンク分割して同じ実装を通す。
 /// チャンク RMS が無音ゲートを超えるときだけ目標 RMS へ向けてゲインを適応させる
-/// （上げはゆっくり・下げは速く）。ゲイン変更はチャンク内で線形ランプし
-/// ジッパーノイズを避ける。
+/// （上げはゆっくり・下げは速く）。ゲイン変更はチャンク内で線形ランプしジッパーノイズを避ける。
+///
+/// ゲート/最大ゲイン（Issue: both+AGC でノイズが持ち上がる件の対策）:
+///   - gateRMS はノイズ床より十分上（-42 dBFS）に置く。室内ノイズやデジタル残留（-45〜-55 dBFS）を
+///     「有音」と誤認して増幅しないため。以前の -55 dBFS はノイズ床すら超えてしまい、無音のはずが
+///     ノイズを +18 dB 持ち上げてしまっていた。
+///   - maxGain は +12 dB に抑える（+18 dB は小声を持ち上げる一方でノイズも過大に増幅する）。
+///   - ゲート未満（無音/ノイズ床）ではゲインを保持せず 1.0 へ戻し、無音区間でノイズが膨らむ
+///     「ポンピング」を防ぐ。ほぼ戻ったら次の有音で即追従できるよう再アームする。
 final class AGCProcessor {
     static let targetRMS: Float = 0.1        // -20 dBFS
-    static let gateRMS: Float = 0.0018       // -55 dBFS 未満は無音（ノイズを持ち上げない）
+    static let gateRMS: Float = 0.0079       // -42 dBFS 未満は無音/ノイズ床とみなし増幅しない
     static let minGain: Float = 0.125        // -18 dB（過大入力の抑え）
-    static let maxGain: Float = 8.0          // +18 dB（小声マイクの持ち上げ）
+    static let maxGain: Float = 4.0          // +12 dB（小声の持ち上げとノイズ増幅のバランス）
     private var gain: Float = 1.0
     private var locked = false               // 最初の有音チャンクで即時追従済みか
 
@@ -132,15 +139,19 @@ final class AGCProcessor {
         }
         let rms = (sum / Float(frames * channels.count)).squareRoot()
         let prev = gain
+        let dt = Double(frames) / sampleRate
         if rms > Self.gateRMS {
             let desired = min(max(Self.targetRMS / rms, Self.minGain), Self.maxGain)
             if !locked {
                 gain = desired; locked = true   // 冒頭だけ即追従（数秒無音のままにしない）
             } else {
-                let dt = Double(frames) / sampleRate
                 let tau = desired < gain ? 0.4 : 3.0
                 gain += (desired - gain) * Float(1 - exp(-dt / tau))
             }
+        } else {
+            // 無音/ノイズ床: ブーストを保持せずゲインを 1.0 へ戻す（無音でノイズを持ち上げない）。
+            gain += (1.0 - gain) * Float(1 - exp(-dt / 0.8))
+            if abs(gain - 1.0) < 0.05 { gain = 1.0; locked = false } // ほぼ戻ったら即追従を再アーム
         }
         let dg = (gain - prev) / Float(frames)
         for ch in channels {
@@ -987,7 +998,8 @@ func runMix(_ argv: [String]) -> Never {
             var sum: Float = 0
             for i in pos..<(pos + nn) { sum += dstL[i] * dstL[i] + dstR[i] * dstR[i] }
             let rms = (sum / Float(nn * 2)).squareRoot()
-            if rms > 0.003 { energy += Double(rms * rms) * Double(nn); counted += nn } // ゲート -50 dBFS
+            // ゲート -42 dBFS。無音/ノイズ床の窓は測定に含めない（無音の合算を持ち上げないため）。
+            if rms > 0.0079 { energy += Double(rms * rms) * Double(nn); counted += nn }
             pos += nn
         }
         if counted > 0 {
