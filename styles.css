@@ -132,9 +132,10 @@
   gap: 8px;
 }
 .rmr-row-label {
-  width: 84px;
+  width: 100px;
   color: var(--text-muted);
   flex-shrink: 0;
+  white-space: nowrap; /* 「手動ミキサー」等の項目名を折り返さない */
 }
 .rmr-row-control {
   flex: 1;

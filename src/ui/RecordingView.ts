@@ -373,13 +373,13 @@ export class RecordingView extends ItemView {
     if (isManual) {
       const src = active ? active.source : this.vSource;
       if (src !== "mic") {
-        this.buildFaderRow(panel, "システム音レベル", this.vSystemGainDb, (db) => {
+        this.buildFaderRow(panel, "システム音", this.vSystemGainDb, (db) => {
           this.vSystemGainDb = db;
           this.plugin.setSystemGain(db); // 録音中でもライブ反映
         });
       }
       if (src !== "system") {
-        this.buildFaderRow(panel, "マイクレベル", this.vMicGainDb, (db) => {
+        this.buildFaderRow(panel, "マイク", this.vMicGainDb, (db) => {
           this.vMicGainDb = db;
           this.plugin.setMicGain(db);
         });
