@@ -80,6 +80,13 @@ struct Options {
     var statusFile: String? = nil
     var pidFile: String? = nil
     var agc: Bool = true                 // 録音時の自動レベル調整+リミッター
+    // 手動ミキサー（リアルタイム・ミキサー）。manual=true のとき AGC は使わず、
+    // ソース別の手動ゲイン（control ファイルで録音中に更新）を適用する。
+    var manual: Bool = false
+    var systemGainDb: Double = 0          // 起動時の初期ゲイン（control ファイルで上書きされる）
+    var micGainDb: Double = 0
+    var controlFile: String? = nil        // プラグインが書く {systemGainDb,micGainDb} を polling
+    var levelFile: String? = nil          // sysrec が {system,mic} の RMS を定期出力
 }
 
 func parseRecordArgs(_ argv: [String]) -> Options {
@@ -96,6 +103,11 @@ func parseRecordArgs(_ argv: [String]) -> Options {
         case "--status-file": o.statusFile = next()
         case "--pidfile": o.pidFile = next()
         case "--agc": o.agc = (next() != "off")
+        case "--manual": o.manual = (next() == "on")
+        case "--system-gain": o.systemGainDb = Double(next()) ?? 0
+        case "--mic-gain": o.micGainDb = Double(next()) ?? 0
+        case "--control-file": o.controlFile = next()
+        case "--level-file": o.levelFile = next()
         case "--tmp": _ = next() // 予約（現状未使用）
         default: break
         }
@@ -159,6 +171,50 @@ final class AGCProcessor {
             var idx = 0
             for _ in 0..<frames { ch[idx] *= g; g += dg; idx += stride }
         }
+    }
+}
+
+/// 手動ミキサー用のソース別ゲイン（リアルタイム・ミキサー）。
+/// target は外部（control ファイルのポーリング）から dB で設定し、process() はチャンク内で
+/// current→target を線形ランプして乗算する（急変のジッパーノイズを避ける）。適用後の RMS を
+/// 返し、メーター表示に使う。setTargetDb は timer スレッド、process は音声コールバックから
+/// 呼ばれ得るため lock で target を保護する。
+final class ManualGain {
+    private let lock = NSLock()
+    private var target: Float
+    private var current: Float
+
+    init(db: Double) { let g = ManualGain.linear(db); target = g; current = g }
+
+    static func linear(_ db: Double) -> Float { Float(pow(10.0, db / 20.0)) }
+
+    func setTargetDb(_ db: Double) {
+        let g = ManualGain.linear(db)
+        lock.lock(); target = g; lock.unlock()
+    }
+
+    /// interleaved 前提の channels（先頭が各チャンネル・stride 間隔）へゲインをランプ乗算し、
+    /// 適用後の RMS(0..1) を返す。
+    @discardableResult
+    func process(_ channels: [UnsafeMutablePointer<Float>], frames: Int, stride: Int) -> Float {
+        guard frames > 0, !channels.isEmpty else { return 0 }
+        lock.lock(); let tgt = target; lock.unlock()
+        let start = current
+        let dg = (tgt - start) / Float(frames)
+        var sumSq: Float = 0
+        for ch in channels {
+            var g = start
+            var idx = 0
+            for _ in 0..<frames {
+                let v = ch[idx] * g
+                ch[idx] = v
+                sumSq += v * v
+                g += dg
+                idx += stride
+            }
+        }
+        current = tgt
+        return (sumSq / Float(frames * channels.count)).squareRoot()
     }
 }
 
@@ -790,9 +846,17 @@ final class Capture {
     private var micFrames: Int64 = 0
     private var stopping = false
     private let stopLock = NSLock()
+    // 手動ミキサー: ソース別ゲイン（control でライブ更新）と、メーター用の平滑化レベル。
+    private let sysGain: ManualGain
+    private let micGain: ManualGain
+    private let levelLock = NSLock()
+    private var sysLevel: Float = 0
+    private var micLevel: Float = 0
 
     init(_ opt: Options, _ emitter: Emitter) {
         self.opt = opt; self.emitter = emitter
+        self.sysGain = ManualGain(db: opt.systemGainDb)
+        self.micGain = ManualGain(db: opt.micGainDb)
         // 出力先パスの用意（both は中間 2 ファイル）
         if opt.source == "both" {
             let base = (opt.out as NSString).deletingPathExtension
@@ -838,6 +902,8 @@ final class Capture {
                                        channels: AVAudioChannelCount(max(1, opt.channels)))
         }
         guard let out = sysNorm?.convert(pcm), out.frameLength > 0 else { return }
+        // 手動ゲイン適用（Auto 時は 0dB＝素通し）＋メーター用 RMS を取得。
+        storeLevel(applyGainAndLevel(out, sysGain), isSystem: true)
         let pts = CMTime(value: sysFrames, timescale: CMTimeScale(opt.sampleRate))
         if let sb = makeAudioSampleBuffer(from: out, pts: pts) {
             sysBox?.append(sb); sysFrames += Int64(out.frameLength)
@@ -852,10 +918,42 @@ final class Capture {
                                        channels: AVAudioChannelCount(max(1, opt.channels)))
         }
         guard let out = micNorm?.convert(pcm), out.frameLength > 0 else { return }
+        storeLevel(applyGainAndLevel(out, micGain), isSystem: false)
         let pts = CMTime(value: micFrames, timescale: CMTimeScale(opt.sampleRate))
         if let sb = makeAudioSampleBuffer(from: out, pts: pts) {
             micBox?.append(sb); micFrames += Int64(out.frameLength)
         }
+    }
+
+    /// interleaved Float32 バッファへ手動ゲインをランプ乗算し、適用後 RMS を返す（メーター用）。
+    private func applyGainAndLevel(_ buf: AVAudioPCMBuffer, _ gain: ManualGain) -> Float {
+        let abl = UnsafeMutableAudioBufferListPointer(buf.mutableAudioBufferList)
+        guard abl.count >= 1, let data = abl[0].mData else { return 0 }
+        let base = data.assumingMemoryBound(to: Float.self)
+        let ch = max(1, Int(abl[0].mNumberChannels))
+        var chans: [UnsafeMutablePointer<Float>] = []
+        for c in 0..<ch { chans.append(base + c) }
+        return gain.process(chans, frames: Int(buf.frameLength), stride: ch)
+    }
+
+    /// メーター用レベルを軽く平滑化して保持（アタック速め・リリース緩め）。
+    private func storeLevel(_ v: Float, isSystem: Bool) {
+        levelLock.lock()
+        if isSystem { sysLevel = v > sysLevel ? v : sysLevel * 0.8 + v * 0.2 }
+        else { micLevel = v > micLevel ? v : micLevel * 0.8 + v * 0.2 }
+        levelLock.unlock()
+    }
+
+    /// control ファイル由来のソース別ゲイン（dB）をライブ適用する（timer から呼ぶ）。
+    func applyControl(systemDb: Double, micDb: Double) {
+        sysGain.setTargetDb(systemDb)
+        micGain.setTargetDb(micDb)
+    }
+
+    /// 現在のメーターレベル (system, mic) を返す（timer から level ファイルへ書く）。
+    func currentLevels() -> (Float, Float) {
+        levelLock.lock(); defer { levelLock.unlock() }
+        return (sysLevel, micLevel)
     }
 
     func stop() {
@@ -1137,6 +1235,35 @@ struct SysRec {
         }
 
         capture.start()
+
+        // 手動ミキサー（リアルタイム）: control ファイルを読んでソース別ゲインをライブ更新し、
+        // level ファイルへ各ソースの RMS を定期出力する（メーター用）。~80ms 周期。
+        // stdin が使えない（detached）ため、制御・計測はファイルシステム経由で行う。
+        if opt.controlFile != nil || opt.levelFile != nil {
+            let timer = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "sysrec.mixer"))
+            timer.schedule(deadline: .now() + 0.08, repeating: 0.08)
+            timer.setEventHandler {
+                // control 読み取り（手動モードのみゲインへ反映）
+                if opt.manual, let cf = opt.controlFile,
+                   let data = FileManager.default.contents(atPath: cf),
+                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    let sg = (obj["systemGainDb"] as? NSNumber)?.doubleValue ?? opt.systemGainDb
+                    let mg = (obj["micGainDb"] as? NSNumber)?.doubleValue ?? opt.micGainDb
+                    capture.applyControl(systemDb: sg, micDb: mg)
+                }
+                // level 書き込み（atomic 上書き）
+                if let lf = opt.levelFile {
+                    let (s, m) = capture.currentLevels()
+                    let obj: [String: Any] = ["system": Double(min(1, s)), "mic": Double(min(1, m))]
+                    if let d = try? JSONSerialization.data(withJSONObject: obj) {
+                        try? d.write(to: URL(fileURLWithPath: lf), options: .atomic)
+                    }
+                }
+            }
+            timer.resume()
+            mixerTimer = timer
+        }
+
         dispatchMain() // 停止イベント待ち（exit はハンドラ側）
     }
 }
@@ -1145,3 +1272,5 @@ struct SysRec {
 var signalSources: [DispatchSourceSignal] = []
 // 電源アサーションを保持（解放されるとスリープ抑止が外れる）
 var powerActivity: NSObjectProtocol?
+// ミキサーのポーリングタイマーを保持（解放されると停止する）
+var mixerTimer: DispatchSourceTimer?

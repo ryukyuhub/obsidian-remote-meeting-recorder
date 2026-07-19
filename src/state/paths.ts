@@ -17,6 +17,10 @@ export interface SessionFilePaths {
   log: string;
   /** 停止時退避先（logs/<id>.log） */
   archivedLog: string;
+  /** 手動ミキサー: プラグイン→sysrec のゲイン制御（<id>.control JSON） */
+  control: string;
+  /** 手動ミキサー: sysrec→プラグインのレベル出力（<id>.level JSON） */
+  level: string;
 }
 
 /** stateDir を解決（設定で上書き可・既定は `$HOME/.meeting-recorder`）。 */
@@ -42,5 +46,7 @@ export function sessionPaths(paths: StatePaths, id: string): SessionFilePaths {
     status: path.join(paths.sessionsDir, `${id}.status`),
     log: path.join(paths.sessionsDir, `${id}.log`),
     archivedLog: path.join(paths.logsDir, `${id}.log`),
+    control: path.join(paths.sessionsDir, `${id}.control`),
+    level: path.join(paths.sessionsDir, `${id}.level`),
   };
 }

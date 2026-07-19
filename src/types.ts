@@ -14,6 +14,8 @@ export interface SessionMeta {
   platform: "darwin" | "win32";
   source: RecorderSource;
   agc: "on" | "off";
+  /** 手動ミキサー（Manual モード）で録音したか。remix 時に mix の agc/normalize を再現するため。 */
+  manualMix?: boolean;
   /** both のときは中間ファイルの base（拡張子込みの最終 .m4a パス）。single は最終ファイル。 */
   out: string;
   bin: string;
@@ -34,6 +36,11 @@ export interface StartOptions {
   label?: string;
   sampleRate?: number;
   channels?: number;
+  /** 手動ミキサー（Manual モード）。true のとき AGC は使わず、ソース別の手動ゲインを適用する。 */
+  manualMix?: boolean;
+  /** 手動ミキサーの初期ゲイン（dB）。録音中は control ファイル経由でライブ更新する。 */
+  systemGainDb?: number;
+  micGainDb?: number;
 }
 
 /** 終端イベントの語彙（設計書 §5.4）。UI はこれを解釈して反応する。 */

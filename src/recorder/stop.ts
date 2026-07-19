@@ -78,15 +78,17 @@ async function doFinalize(ctx: RecorderContext, meta: SessionMeta): Promise<Term
   const durationSec = parseDurationSec(sp.status);
 
   if (meta.source === "both") {
-    const outcome = await mixOrRescue(ctx, meta.bin, meta.out, meta.agc, meta.id);
+    const outcome = await mixOrRescue(ctx, meta.bin, meta.out, meta.agc, meta.id, !!meta.manualMix);
     switch (outcome.kind) {
       case "mixed":
       case "rescued":
         return savedTerminalEvent("stopped", meta.id, meta.source, meta.out, durationSec);
       case "mix-failed":
-        // 中間+json+log を温存 / pid+status のみ rm → stop-warning（remix で復旧可）
+        // 中間+json+log を温存 / pid+status+control+level のみ rm → stop-warning（remix で復旧可）
         safeUnlink(sp.pid);
         safeUnlink(sp.status);
+        safeUnlink(sp.control);
+        safeUnlink(sp.level);
         return {
           event: "stop-warning",
           sessionId: meta.id,

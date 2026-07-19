@@ -16,7 +16,8 @@ export function runMix(
   sys: string,
   mic: string,
   out: string,
-  agc: "on" | "off"
+  agc: "on" | "off",
+  normalize: "on" | "off" = "on"
 ): Promise<boolean> {
   return new Promise((resolve) => {
     // 出力チャンネル数（1=モノラル / 2=ステレオ）。会議は L≒R になりがちなので既定はモノラル寄り。
@@ -33,6 +34,9 @@ export function runMix(
       out,
       "--agc",
       agc,
+      // 手動ミキサーは手動で焼いた per-source バランスを保つため正規化しない。
+      "--normalize",
+      normalize,
       "--channels",
       channels,
       // 出力ビットレート算出用（サンプルレートを下げると mix 出力も小さくなる）。
@@ -98,14 +102,17 @@ export async function mixOrRescue(
   bin: string,
   out: string,
   agc: "on" | "off",
-  id: string
+  id: string,
+  manualMix = false
 ): Promise<MixOutcome> {
   const { sys, mic } = intermediatePaths(out);
   const sysE = existsWithSize(sys);
   const micE = existsWithSize(mic);
+  // Manual モードは正規化しない（手動バランスを保つ・リミッターのみ）。
+  const normalize: "on" | "off" = manualMix ? "off" : "on";
 
   if (sysE && micE) {
-    const ok = await runMix(ctx, bin, sys, mic, out, agc);
+    const ok = await runMix(ctx, bin, sys, mic, out, agc, normalize);
     if (!ok) return { kind: "mix-failed", sys, mic };
     safeUnlink(sys);
     safeUnlink(mic);
@@ -138,6 +145,7 @@ export async function remix(ctx: RecorderContext, opts: RemixOptions): Promise<T
   let out = opts.outPath;
   let source: RecorderSource = "both";
   let agc: "on" | "off" = "on";
+  let manualMix = false;
 
   if (opts.sessionId) {
     const meta = readSessionMeta(sessionPaths(ctx.paths, opts.sessionId).json);
@@ -147,6 +155,7 @@ export async function remix(ctx: RecorderContext, opts: RemixOptions): Promise<T
     out = meta.out;
     source = meta.source;
     agc = meta.agc;
+    manualMix = !!meta.manualMix;
   }
   if (opts.agc) agc = opts.agc; // 引数優先
 
@@ -157,7 +166,7 @@ export async function remix(ctx: RecorderContext, opts: RemixOptions): Promise<T
     return { event: "remix-error", sessionId: id, message: "sysrec バイナリが見つかりません" };
   }
 
-  const outcome = await mixOrRescue(ctx, bin, out, agc, id);
+  const outcome = await mixOrRescue(ctx, bin, out, agc, id, manualMix);
   switch (outcome.kind) {
     case "mixed":
     case "rescued":

@@ -17,6 +17,11 @@ export interface RMRSettings {
   sampleRate: number;
   channels: number;
   defaultAgc: boolean;
+  /** 手動ミキサー（Manual モード）を既定にするか。AGC と排他。 */
+  enableManualMixer: boolean;
+  /** 手動ミキサーの初期ゲイン（dB） */
+  defaultSystemGainDb: number;
+  defaultMicGainDb: number;
   defaultSource: RecorderSource;
   monitor: boolean;
   inputDeviceUid: string;
@@ -40,6 +45,9 @@ export const DEFAULT_SETTINGS: RMRSettings = {
   sampleRate: 48000,
   channels: 1,
   defaultAgc: true,
+  enableManualMixer: false,
+  defaultSystemGainDb: 0,
+  defaultMicGainDb: 0,
   defaultSource: "both",
   monitor: false,
   inputDeviceUid: "",
@@ -166,6 +174,15 @@ export class RMRSettingTab extends PluginSettingTab {
         "（-16 dBFS へ正規化 + -1 dBFS リミッター）",
       () => s.defaultAgc,
       (v) => (s.defaultAgc = v)
+    );
+
+    this.bindToggle(
+      "手動ミキサーを既定にする",
+      "録音ビューの初期モードを手動ミキサーにします。オンのとき AGC は無効になり、" +
+        "録音中にシステム音とマイクのレベルを 2 本のフェーダーで個別に調整できます（メーターも 2 本）。" +
+        "録音ごとに録音ビューで Auto / 手動を切り替えられます。",
+      () => s.enableManualMixer,
+      (v) => (s.enableManualMixer = v)
     );
 
     // 入力デバイス（macOS=sysrec list-devices / Windows=enumerateDevices で非同期に populate）

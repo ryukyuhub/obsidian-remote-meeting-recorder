@@ -22,6 +22,10 @@ export class RecordingView extends ItemView {
   private vAgc: boolean;
   private vMicDevice: string;
   private vMonitor: boolean;
+  // 手動ミキサー（Manual モード）と、ソース別ゲイン(dB)
+  private vManualMix: boolean;
+  private vSystemGainDb: number;
+  private vMicGainDb: number;
 
   // 埋め込み先ノート（未選択なら停止時に埋め込みしない）
   private vEmbedFile: TFile | null = null;
@@ -29,13 +33,13 @@ export class RecordingView extends ItemView {
   // マイクデバイス一覧（list-devices・onOpen で取得）
   private micDevices: MicDevice[] = [];
 
-  // ライブ波形（レベルはプラグイン所有のマイクタップから読む）
-  private waveform: WaveformRenderer | null = null;
+  // ライブ波形/メーター（ソースごとに 1 本。レベルは plugin.getSourceLevels() から読む）
+  private waveforms: WaveformRenderer[] = [];
+  private meterCanvases: { source: "system" | "mic"; canvas: HTMLCanvasElement }[] = [];
 
   // DOM 参照
   private timerEl: HTMLElement | null = null;
   private waveWrapEl: HTMLElement | null = null;
-  private canvasEl: HTMLCanvasElement | null = null;
 
   constructor(leaf: WorkspaceLeaf, plugin: RemoteMeetingRecorderPlugin) {
     super(leaf);
@@ -47,6 +51,9 @@ export class RecordingView extends ItemView {
     this.vAgc = s.defaultAgc;
     this.vMicDevice = s.inputDeviceUid;
     this.vMonitor = s.monitor;
+    this.vManualMix = s.enableManualMixer;
+    this.vSystemGainDb = s.defaultSystemGainDb;
+    this.vMicGainDb = s.defaultMicGainDb;
   }
 
   getViewType(): string {
@@ -69,9 +76,8 @@ export class RecordingView extends ItemView {
     } catch {
       // 取得失敗は「既定」のみで続行
     }
-    // 録音中にビューを開き直したらマイクメーターを復帰（mic/both のみ）
-    const active = this.plugin.activeRecording;
-    if (active && active.source !== "system" && this.canvasEl) {
+    // 録音中にビューを開き直したらメーターを復帰（buildWaveArea が canvas を用意済み）
+    if (this.plugin.activeRecording && this.meterCanvases.length) {
       this.startWaveform();
     }
   }
@@ -155,7 +161,7 @@ export class RecordingView extends ItemView {
     this.buildInputRow(panel, active != null);
     this.buildMonitorRow(panel);
     this.buildStaticRow(panel, "Format", "M4A（固定）");
-    this.buildAgcRow(panel, active != null);
+    this.buildLevelRows(panel, active != null);
 
     if (active) {
       panel.createDiv({
@@ -173,16 +179,30 @@ export class RecordingView extends ItemView {
     });
   }
 
+  /** 現在の source で表示すべきメーターのソース列（both=2本、単体=1本）。 */
+  private meterSourcesFor(source: RecorderSource): ("system" | "mic")[] {
+    if (source === "both") return ["system", "mic"];
+    if (source === "system") return ["system"];
+    return ["mic"];
+  }
+
   private buildWaveArea(isRecording: boolean): void {
     const wrap = this.waveWrapEl;
     if (!wrap) return;
     wrap.empty();
+    this.meterCanvases = [];
     const active = this.plugin.activeRecording;
-    const showMeter = isRecording && active != null && active.source !== "system";
-    if (showMeter) {
-      this.canvasEl = wrap.createEl("canvas", { cls: "rmr-canvas" });
-    } else if (isRecording) {
-      wrap.createDiv({ cls: "rmr-wave-msg", text: "システム音声を録音中…" });
+    if (isRecording && active) {
+      // ソースごとに「ラベル＋メーター」を1行ずつ（system メーターも sysrec の RMS で表示）。
+      for (const src of this.meterSourcesFor(active.source)) {
+        const meter = wrap.createDiv({ cls: "rmr-meter" });
+        meter.createDiv({
+          cls: "rmr-meter-label",
+          text: src === "system" ? "システム音" : "マイク",
+        });
+        const canvas = meter.createEl("canvas", { cls: "rmr-canvas" });
+        this.meterCanvases.push({ source: src, canvas });
+      }
     } else {
       wrap.createDiv({ cls: "rmr-wave-msg", text: "待機中" });
     }
@@ -223,7 +243,10 @@ export class RecordingView extends ItemView {
       input.checked = current === src;
       input.disabled = locked;
       input.addEventListener("change", () => {
-        if (input.checked) this.vSource = src;
+        if (!input.checked) return;
+        this.vSource = src;
+        // 手動ミキサーはソースでフェーダー本数が変わるので再描画（非録音時のみ）。
+        if (!locked) this.render();
       });
       lbl.createSpan({ text: sourceLabel(src) });
     });
@@ -328,12 +351,66 @@ export class RecordingView extends ItemView {
     this.addRow(panel, label, "rmr-static").setText(value);
   }
 
-  private buildAgcRow(panel: HTMLElement, locked: boolean): void {
+  /**
+   * レベル調整の行群。「手動ミキサー」トグル（Manual モード＝AGC 置き換え）と、
+   * Manual 時はソース別フェーダー、Auto 時は Auto gain チェックを出す。
+   * モード切替は録音中ロック。フェーダーは Monitor と同じく録音中もライブ変更可。
+   */
+  private buildLevelRows(panel: HTMLElement, locked: boolean): void {
     const active = this.plugin.activeRecording;
-    this.buildCheckboxRow(panel, "Auto gain", {
-      checked: active ? active.agc === "on" : this.vAgc,
+    const isManual = active ? active.manualMix : this.vManualMix;
+
+    this.buildCheckboxRow(panel, "手動ミキサー", {
+      checked: isManual,
       disabled: locked,
-      onChange: (checked) => (this.vAgc = checked),
+      hint: "システム音とマイクを個別に手動調整（Auto gain は無効）",
+      onChange: (checked) => {
+        this.vManualMix = checked;
+        this.render();
+      },
+    });
+
+    if (isManual) {
+      const src = active ? active.source : this.vSource;
+      if (src !== "mic") {
+        this.buildFaderRow(panel, "システム音レベル", this.vSystemGainDb, (db) => {
+          this.vSystemGainDb = db;
+          this.plugin.setSystemGain(db); // 録音中でもライブ反映
+        });
+      }
+      if (src !== "system") {
+        this.buildFaderRow(panel, "マイクレベル", this.vMicGainDb, (db) => {
+          this.vMicGainDb = db;
+          this.plugin.setMicGain(db);
+        });
+      }
+    } else {
+      this.buildCheckboxRow(panel, "Auto gain", {
+        checked: active ? active.agc === "on" : this.vAgc,
+        disabled: locked,
+        onChange: (checked) => (this.vAgc = checked),
+      });
+    }
+  }
+
+  /** dB フェーダー行（-24〜+24dB）。録音中もロックせずライブ変更。 */
+  private buildFaderRow(
+    panel: HTMLElement,
+    label: string,
+    valueDb: number,
+    onChange: (db: number) => void
+  ): void {
+    const control = this.addRow(panel, label, "rmr-fader-control");
+    const range = control.createEl("input", {
+      cls: "rmr-fader",
+      attr: { type: "range", min: "-24", max: "24", step: "1" },
+    });
+    range.value = String(valueDb);
+    const val = control.createSpan({ cls: "rmr-fader-val", text: fmtDb(valueDb) });
+    range.addEventListener("input", () => {
+      const db = Number(range.value);
+      val.setText(fmtDb(db));
+      onChange(db);
     });
   }
 
@@ -349,6 +426,9 @@ export class RecordingView extends ItemView {
         label: this.vTitle,
         micDevice: this.vMicDevice,
         monitor: this.vMonitor,
+        manualMix: this.vManualMix,
+        systemGainDb: this.vSystemGainDb,
+        micGainDb: this.vMicGainDb,
         embedNotePath: this.vEmbedFile?.path,
       });
     } catch (e) {
@@ -356,9 +436,9 @@ export class RecordingView extends ItemView {
       this.render();
       return;
     }
-    // 先に録音状態で再描画（canvas を生成）してから波形を繋ぐ（タップはプラグインが起動）
+    // 先に録音状態で再描画（canvas を生成）してからメーターを繋ぐ（タップはプラグインが起動）
     this.render();
-    if (this.plugin.activeRecording && this.plugin.activeRecording.source !== "system") {
+    if (this.plugin.activeRecording) {
       this.startWaveform();
     }
   }
@@ -370,17 +450,23 @@ export class RecordingView extends ItemView {
     this.render();
   }
 
-  /** プラグイン所有のマイクタップからレベルを読んで波形を描く。 */
+  /** 各ソースのメーターに、plugin.getSourceLevels() のソース別レベルを流して描く。 */
   private startWaveform(): void {
-    if (!this.canvasEl) return;
     this.stopWaveform();
-    this.waveform = new WaveformRenderer(this.canvasEl, () => this.plugin.getMicLevel());
-    this.waveform.start();
+    for (const { source, canvas } of this.meterCanvases) {
+      const r = new WaveformRenderer(canvas, () =>
+        source === "system"
+          ? this.plugin.getSourceLevels().system
+          : this.plugin.getSourceLevels().mic
+      );
+      r.start();
+      this.waveforms.push(r);
+    }
   }
 
   private stopWaveform(): void {
-    this.waveform?.stop();
-    this.waveform = null;
+    for (const r of this.waveforms) r.stop();
+    this.waveforms = [];
   }
 }
 
@@ -393,4 +479,9 @@ function sourceLabel(src: RecorderSource): string {
     case "both":
       return "両方";
   }
+}
+
+/** ゲイン(dB)の表示（+付き・0dB も明示）。 */
+function fmtDb(db: number): string {
+  return `${db > 0 ? "+" : ""}${db} dB`;
 }

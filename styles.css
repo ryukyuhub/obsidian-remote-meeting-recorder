@@ -30,20 +30,54 @@
   font-weight: 600;
 }
 .rmr-wave {
-  height: 72px;
+  min-height: 72px;
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  align-items: stretch;
   justify-content: center;
+  gap: 4px;
+  padding: 6px 8px;
   background: var(--background-secondary);
   border-radius: 8px;
 }
+/* ソース別メーター（ラベル＋波形）。both は 2 段。 */
+.rmr-meter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+}
+.rmr-meter-label {
+  flex: 0 0 68px;
+  color: var(--text-muted);
+  font-size: 0.8em;
+}
 .rmr-canvas {
+  flex: 1;
   width: 100%;
   height: 100%;
 }
 .rmr-wave-msg {
   color: var(--text-muted);
   font-size: 0.9em;
+  text-align: center;
+}
+/* ソース別ゲインのフェーダー行 */
+.rmr-fader-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.rmr-fader {
+  flex: 1;
+  accent-color: var(--interactive-accent);
+}
+.rmr-fader-val {
+  flex: 0 0 52px;
+  text-align: right;
+  color: var(--text-muted);
+  font-size: 0.85em;
+  font-variant-numeric: tabular-nums;
 }
 .rmr-timer {
   text-align: center;

@@ -56,9 +56,16 @@ export async function startRecording(
   const sp = sessionPaths(ctx.paths, id);
   ensureDir(ctx.paths.sessionsDir);
   fs.writeFileSync(sp.status, "");
+  // 手動ミキサー: control（プラグイン→sysrec ゲイン）/ level（sysrec→プラグイン RMS）を初期化。
+  // sysrec は両ファイルを polling/出力する（メーターは Auto/Manual 両モードで動く）。
+  fs.writeFileSync(
+    sp.control,
+    JSON.stringify({ systemGainDb: o.systemGainDb ?? 0, micGainDb: o.micGainDb ?? 0 })
+  );
+  fs.writeFileSync(sp.level, JSON.stringify({ system: 0, mic: 0 }));
 
   // 4. argv
-  const argv = buildArgv(ctx, o, out, sp.status, sp.pid);
+  const argv = buildArgv(ctx, o, out, sp);
 
   // 5. 起動 → pidfile 待ち → 生存確認
   let spawnedPid: number;
@@ -85,7 +92,8 @@ export async function startRecording(
     pid: polled,
     platform: "darwin",
     source: o.source,
-    agc: o.agc ? "on" : "off",
+    agc: o.manualMix ? "off" : o.agc ? "on" : "off",
+    manualMix: o.manualMix,
     out,
     bin,
     startedAt: Date.now(),
@@ -120,24 +128,37 @@ function buildArgv(
   ctx: RecorderContext,
   o: StartOptions,
   out: string,
-  statusPath: string,
-  pidPath: string
+  sp: SessionFilePaths
 ): string[] {
+  // Manual モードは AGC を使わない（手動ゲインで置き換え）。
+  const agc = o.manualMix ? "off" : o.agc ? "on" : "off";
   const argv = [
     "--out", out,
     "--source", o.source,
     "--samplerate", String(o.sampleRate ?? ctx.settings.sampleRate),
     "--channels", String(o.channels ?? ctx.settings.channels),
-    "--agc", o.agc ? "on" : "off",
-    "--status-file", statusPath,
-    "--pidfile", pidPath,
+    "--agc", agc,
+    "--status-file", sp.status,
+    "--pidfile", sp.pid,
+    // メーター/ミキサー用（Auto/Manual 両モードで level は出力される）。
+    "--control-file", sp.control,
+    "--level-file", sp.level,
   ];
+  if (o.manualMix) {
+    argv.push(
+      "--manual", "on",
+      "--system-gain", String(o.systemGainDb ?? 0),
+      "--mic-gain", String(o.micGainDb ?? 0)
+    );
+  }
   if (o.micDevice) argv.push("--mic-device", o.micDevice);
   return argv;
 }
 
-/** 起動失敗時: pid/status を rm（JSON は書いていない・log は tail 用に残す）。 */
+/** 起動失敗時: pid/status/control/level を rm（JSON は書いていない・log は tail 用に残す）。 */
 function cleanupFailed(sp: SessionFilePaths): void {
   safeUnlink(sp.pid);
   safeUnlink(sp.status);
+  safeUnlink(sp.control);
+  safeUnlink(sp.level);
 }

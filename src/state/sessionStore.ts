@@ -44,12 +44,14 @@ export function listSessions(paths: StatePaths): SessionMeta[] {
   return out;
 }
 
-/** json/pid/status を削除（log は archiveLog で退避するため残す）。 */
+/** json/pid/status/control/level を削除（log は archiveLog で退避するため残す）。 */
 export function deleteSessionFiles(paths: StatePaths, id: string): void {
   const p = sessionPaths(paths, id);
   safeUnlink(p.json);
   safeUnlink(p.pid);
   safeUnlink(p.status);
+  safeUnlink(p.control);
+  safeUnlink(p.level);
 }
 
 /** sessions/<id>.log → logs/<id>.log へ退避（原因究明用・消さない）。 */

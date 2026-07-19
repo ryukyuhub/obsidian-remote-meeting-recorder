@@ -30,6 +30,8 @@ import { listWebMicDevices } from "./audio/webDevices";
 import { linkToDailyNote } from "./ui/dailyNote";
 import { rotateLogs, readSessionMeta } from "./state/sessionStore";
 import { sessionPaths } from "./state/paths";
+import { LevelPoller } from "./recorder/levelPoller";
+import { atomicWriteFile } from "./util/fsx";
 import { WebAudioTap } from "./audio/webAudioTap";
 import { ControlWindowManager } from "./ui/controlWindow";
 import { runTranscription } from "./transcribe/runTranscription";
@@ -48,6 +50,7 @@ export interface ActiveRecordingInfo {
   sessionId: string;
   source: RecorderSource;
   agc: "on" | "off";
+  manualMix: boolean;
   startedAt: number;
   label?: string;
 }
@@ -58,6 +61,7 @@ function toActiveRecordingInfo(meta: SessionMeta): ActiveRecordingInfo {
     sessionId: meta.id,
     source: meta.source,
     agc: meta.agc,
+    manualMix: !!meta.manualMix,
     startedAt: meta.startedAt,
     label: meta.label,
   };
@@ -77,6 +81,10 @@ export interface StartFromViewInput {
   label?: string;
   micDevice?: string;
   monitor?: boolean;
+  /** 手動ミキサー（Manual モード）と初期ゲイン(dB) */
+  manualMix?: boolean;
+  systemGainDb?: number;
+  micGainDb?: number;
   /** 埋め込み先ノートのパス（未指定なら停止時に埋め込みしない） */
   embedNotePath?: string;
 }
@@ -99,6 +107,9 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
   // マイクの表示専用タップ（録音ビュー・ミニ窓の両方が参照する一元所有・§3.4）
   private micTap: WebAudioTap | null = null;
   private controlWindow: ControlWindowManager | null = null;
+  // 手動ミキサー: sysrec の level ファイルを読むポーラーと、現在のソース別ゲイン(dB)。
+  private levelPoller: LevelPoller | null = null;
+  private mixerGain = { systemDb: 0, micDb: 0 };
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -246,6 +257,7 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
     this.controlWindow?.destroy();
     this.controlWindow = null;
     this.stopMicTap();
+    this.stopLevelPoller();
   }
 
   // ================================================================
@@ -317,6 +329,9 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
       agc: input.agc,
       label: input.label,
       micDevice: input.micDevice || this.settings.inputDeviceUid || undefined,
+      manualMix: input.manualMix,
+      systemGainDb: input.systemGainDb,
+      micGainDb: input.micGainDb,
     };
 
     // 埋め込み先ノートを開始時にキャプチャ（設計書 §9.4）。
@@ -364,6 +379,13 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
     if (meta.source !== "system" && process.platform !== "win32") {
       this.startMicTap(opts.micDevice, monitor);
     }
+    // 手動ミキサー: 初期ゲインを控え、sysrec の level ファイルのポーリングを開始（macOS）。
+    this.mixerGain = { systemDb: opts.systemGainDb ?? 0, micDb: opts.micGainDb ?? 0 };
+    if (process.platform !== "win32") {
+      const level = sessionPaths(this.buildContext().paths, meta.id).level;
+      this.levelPoller = new LevelPoller(level);
+      this.levelPoller.start();
+    }
     this.maybeOpenControlWindow();
   }
 
@@ -396,9 +418,59 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
     return this.micTap?.getLevel() ?? 0;
   }
 
+  /**
+   * 録音中のソース別レベル（0..1）。system/mic の 2 メーター用。
+   * macOS は sysrec の level ファイル（LevelPoller）、Windows は WebRecorder から取得。
+   * （Windows の per-source 分離は後続。現状は system=0 / mic=混合レベルにフォールバック。）
+   */
+  getSourceLevels(): { system: number; mic: number } {
+    if (this.levelPoller) return this.levelPoller.levels();
+    const id = this.activeRecording?.sessionId;
+    if (id) {
+      const rec = this.webRecorders.get(id);
+      if (rec) return { system: 0, mic: rec.getLevel() };
+    }
+    return { system: 0, mic: 0 };
+  }
+
   /** モニター（試聴）オン/オフをタップに反映。 */
   setMonitor(on: boolean): void {
     this.micTap?.setMonitor(on);
+  }
+
+  /** 手動ミキサー: システム音のゲイン(dB)を録音中にライブ変更する。 */
+  setSystemGain(db: number): void {
+    this.mixerGain.systemDb = db;
+    this.writeMixerControl();
+  }
+
+  /** 手動ミキサー: マイクのゲイン(dB)を録音中にライブ変更する。 */
+  setMicGain(db: number): void {
+    this.mixerGain.micDb = db;
+    this.writeMixerControl();
+  }
+
+  /** 現在のミキサーゲイン(dB)を control ファイルへ書く（sysrec が polling してライブ適用）。 */
+  private writeMixerControl(): void {
+    const id = this.activeRecording?.sessionId;
+    if (!id) return;
+    try {
+      const control = sessionPaths(this.buildContext().paths, id).control;
+      atomicWriteFile(
+        control,
+        JSON.stringify({
+          systemGainDb: this.mixerGain.systemDb,
+          micGainDb: this.mixerGain.micDb,
+        })
+      );
+    } catch {
+      /* 書けなくても録音は継続 */
+    }
+  }
+
+  private stopLevelPoller(): void {
+    this.levelPoller?.stop();
+    this.levelPoller = null;
   }
 
   private startWatcher(meta: SessionMeta): void {
@@ -473,6 +545,7 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
     if (wasActive) {
       this.activeRecording = null;
       this.stopMicTap();
+      this.stopLevelPoller();
       this.controlWindow?.close();
     }
 
