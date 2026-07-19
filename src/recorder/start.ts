@@ -143,6 +143,8 @@ function buildArgv(
     // メーター/ミキサー用（Auto/Manual 両モードで level は出力される）。
     "--control-file", sp.control,
     "--level-file", sp.level,
+    // マイクのノイズゲート閾値（AGC 有効時のみ効く・"off" もしくは dBFS）。
+    "--mic-gate", ctx.settings.micNoiseGate,
   ];
   if (o.manualMix) {
     argv.push(

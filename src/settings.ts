@@ -17,6 +17,8 @@ export interface RMRSettings {
   sampleRate: number;
   channels: number;
   defaultAgc: boolean;
+  /** マイクのノイズゲート閾値（AGC 有効時）。"off" もしくは dBFS 文字列（例 "-40"）。 */
+  micNoiseGate: string;
   /** 手動ミキサー（Manual モード）を既定にするか。AGC と排他。 */
   enableManualMixer: boolean;
   /** 手動ミキサーの初期ゲイン（dB） */
@@ -45,6 +47,7 @@ export const DEFAULT_SETTINGS: RMRSettings = {
   sampleRate: 48000,
   channels: 1,
   defaultAgc: true,
+  micNoiseGate: "-40",
   enableManualMixer: false,
   defaultSystemGainDb: 0,
   defaultMicGainDb: 0,
@@ -174,6 +177,22 @@ export class RMRSettingTab extends PluginSettingTab {
         "（-16 dBFS へ正規化 + -1 dBFS リミッター）",
       () => s.defaultAgc,
       (v) => (s.defaultAgc = v)
+    );
+
+    this.bindDropdown(
+      "マイクのノイズゲート（無音カット）",
+      "Auto gain 有効時、マイク入力がこの音量以下なら「無音」とみなして録音レベルをほぼ 0 まで下げます。" +
+        "会話の合間の環境ノイズや息継ぎが録音に乗らなくなります。しきい値が高い（0 に近い）ほど強くカットします" +
+        "（小声も切れやすくなります）。手動ミキサー使用時は無効。",
+      [
+        ["off", "オフ（カットしない）"],
+        ["-48", "弱（-48 dBFS・かなり静かな音だけカット）"],
+        ["-40", "標準（-40 dBFS・推奨）"],
+        ["-34", "強（-34 dBFS・しっかりカット）"],
+        ["-28", "最強（-28 dBFS・小声も切れます）"],
+      ],
+      () => s.micNoiseGate,
+      (v) => (s.micNoiseGate = v)
     );
 
     this.bindToggle(

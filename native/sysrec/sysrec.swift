@@ -87,6 +87,9 @@ struct Options {
     var micGainDb: Double = 0
     var controlFile: String? = nil        // プラグインが書く {systemGainDb,micGainDb} を polling
     var levelFile: String? = nil          // sysrec が {system,mic} の RMS を定期出力
+    // マイクのノイズゲート（AGC 有効時）。micGate=false でオフ。閾値は dBFS。
+    var micGate: Bool = true
+    var micGateDb: Double = -40
 }
 
 func parseRecordArgs(_ argv: [String]) -> Options {
@@ -108,6 +111,10 @@ func parseRecordArgs(_ argv: [String]) -> Options {
         case "--mic-gain": o.micGainDb = Double(next()) ?? 0
         case "--control-file": o.controlFile = next()
         case "--level-file": o.levelFile = next()
+        case "--mic-gate":
+            let v = next()
+            if v == "off" { o.micGate = false }
+            else if let db = Double(v) { o.micGate = true; o.micGateDb = db }
         case "--tmp": _ = next() // 予約（現状未使用）
         default: break
         }
@@ -304,18 +311,21 @@ func scaledBitrate(_ base: Int, sampleRate: Int) -> Int {
 /// 有音が hold を超えて途切れたら緩やかに閉じる（語尾切れ・チャタリングを避ける）。
 /// 判定は AGC で持ち上げる前の生入力 RMS で行う（AGC と綱引きしないため）。
 final class NoiseGate {
-    static let openRMS: Float = 0.01     // -40 dBFS 以上を「有音」とみなして開く
     static let floor: Float = 0.0        // 閉時ゲイン（0＝ほぼ無音）
     static let holdSec: Double = 0.2     // 有音が途切れても開けておく保持時間
+    private let openRMS: Float           // これ以上を「有音」とみなして開く（閾値・可変）
     private var gain: Float = 1.0
     private var hold: Double = 0
+
+    /// thresholdDb（例 -40 dBFS）以上を有音とみなす。閾値は設定で選べる。
+    init(thresholdDb: Double) { openRMS = Float(pow(10.0, thresholdDb / 20.0)) }
 
     /// AGC/リミッター適用後の channels に、生入力 RMS で判定したゲートゲインをランプ乗算する。
     func process(_ channels: [UnsafeMutablePointer<Float>], frames: Int, stride: Int,
                  sampleRate: Double, inputRMS: Float) {
         guard frames > 0, !channels.isEmpty else { return }
         let dt = Double(frames) / sampleRate
-        if inputRMS >= Self.openRMS { hold = Self.holdSec } else { hold = max(0, hold - dt) }
+        if inputRMS >= openRMS { hold = Self.holdSec } else { hold = max(0, hold - dt) }
         let target: Float = hold > 0 ? 1.0 : Self.floor
         let prev = gain
         let tau = target > gain ? 0.008 : 0.15   // 開:速い(8ms) / 閉:緩やか(150ms)
@@ -356,12 +366,12 @@ final class WriterBox {
     private let limiter: StreamingLimiter?
     private let noiseGate: NoiseGate?  // マイク（gate=true）かつ AGC 有効時のみ
 
-    init(path: String, label: String, agc: Bool, gate: Bool = false) {
+    init(path: String, label: String, agc: Bool, gate: Bool = false, gateDb: Double = -40) {
         self.path = path
         self.label = label
         self.agc = agc ? AGCProcessor() : nil
         self.limiter = agc ? StreamingLimiter() : nil
-        self.noiseGate = (agc && gate) ? NoiseGate() : nil
+        self.noiseGate = (agc && gate) ? NoiseGate(thresholdDb: gateDb) : nil
     }
 
     /// サンプルバッファを追記する（必要なら初回にライタ生成）。
@@ -908,12 +918,14 @@ final class Capture {
         if opt.source == "both" {
             let base = (opt.out as NSString).deletingPathExtension
             sysBox = WriterBox(path: base + ".sys.m4a", label: "system", agc: opt.agc)
-            // マイクは AGC 有効時にノイズゲート（無音を著しく減衰）を掛ける。
-            micBox = WriterBox(path: base + ".mic.m4a", label: "microphone", agc: opt.agc, gate: true)
+            // マイクは AGC 有効時にノイズゲート（無音を著しく減衰）を掛ける。閾値は設定で可変。
+            micBox = WriterBox(path: base + ".mic.m4a", label: "microphone", agc: opt.agc,
+                               gate: opt.micGate, gateDb: opt.micGateDb)
         } else if opt.source == "system" {
             sysBox = WriterBox(path: opt.out, label: "system", agc: opt.agc)
         } else { // mic
-            micBox = WriterBox(path: opt.out, label: "microphone", agc: opt.agc, gate: true)
+            micBox = WriterBox(path: opt.out, label: "microphone", agc: opt.agc,
+                               gate: opt.micGate, gateDb: opt.micGateDb)
         }
     }
 
