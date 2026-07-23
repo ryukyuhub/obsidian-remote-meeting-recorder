@@ -20,7 +20,8 @@ export interface WebStartResult extends StartResult {
 export async function startWebRecording(
   ctx: RecorderContext,
   o: StartOptions,
-  onTerminated: (sessionId: string) => void
+  onTerminated: (sessionId: string) => void,
+  onSilence?: () => void
 ): Promise<WebStartResult> {
   ensureDir(o.saveDir);
 
@@ -37,10 +38,12 @@ export async function startWebRecording(
     micDevice: o.micDevice,
     mimeType: fmt.mimeType,
     sampleRate: o.sampleRate ?? ctx.settings.sampleRate,
+    agc: o.agc,
     manualMix: o.manualMix,
     systemGainDb: o.systemGainDb,
     micGainDb: o.micGainDb,
     onTerminated: () => onTerminated(id),
+    onSilence,
   });
 
   // 起動検証: 実際に録音が始まってから JSON を書く（半端な状態を残さない・設計書 §5.2 の思想を踏襲）。

@@ -64,6 +64,28 @@ Windows では Chromium/Electron が**システム音声（ループバック）
 - 🔨 **W4（実装済み・実機未検証）**：`resolveWhisperBin` を Windows 対応（`whisper-cli.exe`＋`Release/` 候補＋native/whisper 浅い走査）。診断に「Windows 版 whisper を取得」導線（`ggml-org/whisper.cpp` の `whisper-bin-x64.zip` を `latest/download` から curl→tar 展開＝`Release/whisper-cli.exe`）。whisper メッセージも Windows 向けに修正。※VC++ 再頒布可能パッケージの要否は未確認（DLL 起動エラー時に案内）。
 - ⏳ **詰め（任意）**：マイクデバイス選択（win32 は `navigator.mediaDevices.enumerateDevices` 化）／音量バランス。
 
+## 進捗（2026-07-23・Issue #4 対応）
+
+Windows で「録音は進むのに中身が無音」の報告（Issue #4）を受けての調査と対処。
+
+### 分かったこと
+- **AutoGain(AGC) が Windows では完全な no-op だった**：`agc` が `WebRecorderOptions` に無く、`startWeb.ts` でセッション JSON に記録されるだけ。マイクは Chromium の `autoGainControl: true` 固定、システム音（ループバック）は無加工、保存時の正規化も無し＝**レベル補正が一段も無い**状態だった。
+- 手動ミキサー ON・0 dB は非手動と完全に同一のグラフ（`dbToLinear(0)=1`）。手動ミキサー自体は無音の原因になり得ない。
+- 症状の実測（報告者）：メーターが両方とも振れない／`.m4a` の長さは正常で中身だけ無音／source=both／録音ビューのボタンから開始。⇒ **Web Audio グラフに音が入っていない**。
+- 7/05 の実機成功以降、Windows 録音パスへの変更は 67f2f74（ソース別ゲイン/メーター・**Windows 実機未検証**）のみ。
+
+### 入れた対処
+- **ノードの GC 対策**：このグラフは `source → gain → MediaStreamDestination` で `ctx.destination` に繋がらないため、Web Audio の「出力に繋がるノードは保持される」規則が効かない。ソースノード／ラッパー MediaStream／dest をローカル変数から `this` の保持へ変更（回収されるとグラフが黙って無音になるため）。
+- **AudioContext の resume**：生成後に `resume()`、running にならなければ起動失敗。録音中に suspended へ落ちたら自動復帰。
+- **無音ウォッチ**：開始から 5 秒レベルが 0 のままなら Notice で警告（長時間録ってから気づく事態を防ぐ）。
+- **AutoGain を Windows でも実装**（macOS の `AGCProcessor` と同一ロジック・`src/recorder/agc.ts`）。チェーンは `source → gain(手動) → agcGain(自動) → limiter → dest`。リミッター（`DynamicsCompressor`・-1 dBFS）は **AutoGain の有無に関わらず常時**。
+- 保存時の -16 dBFS 正規化は Windows では非対応（MediaRecorder が最終ファイルを直接書くため後段処理を持てない）。実時間 AGC が目標 -20 dBFS へ寄せることで代替する。
+
+### 検証
+- AGC 中核（`nextAgcState`/`rmsOf`）を純関数に切り出し、`test/e2e.mjs` で数値検証（クランプ・ゲート・再アーム・上げ遅く下げ速く）。
+- ノードグラフ実挙動を Obsidian レンダラ（macOS）で検証（`dev/web-agc-verify.js`・合成正弦波を MediaStream 化）：小音量 +13 dB / AGC オフは素通し +0.2 dB / 過大入力はピーク 0.78＝シーリング以下。
+- **Windows 実機での通し確認は未実施**（実機なし）。切り分け用に `dev/win-audio-diag.js`（マイク／ループバックを段階的に測る）を用意。
+
 ### W4 の検証手順（Windows 実機）
 1. 新 `main.js` を配送 → プラグイン再読み込み
 2. 診断 →「Windows 版 whisper を取得」→ `native/whisper/Release/whisper-cli.exe` が展開される

@@ -346,7 +346,17 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
     try {
       if (process.platform === "win32") {
         // Windows: 外部バイナリを使わずレンダラ内 Web Audio で録音する（Windows対応 実装計画）。
-        const r = await startWebRecording(ctx, opts, (id) => this.onWebTerminated(id));
+        const r = await startWebRecording(
+          ctx,
+          opts,
+          (id) => this.onWebTerminated(id),
+          () =>
+            new Notice(
+              "録音レベルが 0 のままです。音声が取り込めていない可能性があります" +
+                "（システム音声の共有・マイクの許可・入力デバイスを確認してください）。",
+              NOTICE_LONG_MS
+            )
+        );
         this.webRecorders.set(r.sessionId, r.recorder);
         result = r;
       } else {

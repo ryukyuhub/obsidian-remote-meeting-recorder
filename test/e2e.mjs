@@ -24,6 +24,7 @@ export { intermediatePaths, existsWithSize } from "./src/util/fsx";
 export { isAlive } from "./src/recorder/spawn";
 export { SessionWatcher } from "./src/recorder/watch";
 export { restoreInProgressSessions } from "./src/recorder/restore";
+export { nextAgcState, initialAgcState, rmsOf, AGC_TARGET_RMS, AGC_GATE_RMS, AGC_MAX_GAIN, AGC_MIN_GAIN } from "./src/recorder/agc";
 `;
 const result = await build({
   stdin: { contents: entry, resolveDir: repoRoot, sourcefile: "e2e-entry.ts", loader: "ts" },
@@ -310,7 +311,51 @@ async function testNormalizeFailKeepsRecording() {
 }
 
 // ====================================================================
+// Windows(Web Audio) の AGC 中核。macOS の sysrec AGCProcessor と同じ挙動になっているかを
+// 数値で確認する（Windows 実機が無くても回帰を検出できるようにするため）。
+function testWebAgcCore() {
+  console.log("\n[12] Windows AGC の中核ロジック（macOS AGCProcessor と同値）");
+  const dt = 0.1;
+
+  // 1) 小さい音（-40 dBFS ≒ 0.01）は目標 -20 dBFS(0.1) へ向けて持ち上げる。冒頭は即時追従。
+  const quiet = api.nextAgcState(0.01, api.initialAgcState(), dt);
+  ok(quiet.locked, "最初の有音チャンクで即時追従（locked）");
+  ok(
+    Math.abs(quiet.gain - api.AGC_MAX_GAIN) < 1e-9,
+    `小さい音は最大ゲイン +12dB でクランプ（実際: ${quiet.gain.toFixed(3)}）`
+  );
+
+  // 2) 過大入力は下げる。ただし最小ゲイン -18dB でクランプ。
+  const loud = api.nextAgcState(1.0, api.initialAgcState(), dt);
+  ok(
+    Math.abs(loud.gain - api.AGC_MIN_GAIN) < 1e-9,
+    `過大入力は最小ゲイン -18dB でクランプ（実際: ${loud.gain.toFixed(3)}）`
+  );
+
+  // 3) ちょうど目標レベルなら 1.0 のまま。
+  const onTarget = api.nextAgcState(api.AGC_TARGET_RMS, api.initialAgcState(), dt);
+  ok(Math.abs(onTarget.gain - 1) < 1e-9, "目標レベルちょうどならゲイン 1.0");
+
+  // 4) ゲート未満（無音・ノイズ床）はブーストせず 1.0 へ戻り、再アームされる。
+  let s = { gain: 4, locked: true };
+  for (let i = 0; i < 40; i++) s = api.nextAgcState(api.AGC_GATE_RMS / 2, s, dt);
+  ok(s.gain === 1 && !s.locked, `無音ではゲインが 1.0 へ戻り再アーム（実際: ${s.gain}）`);
+
+  // 5) 上げは遅く・下げは速い（tau 3.0 / 0.4）。同じ dt での移動量で比較する。
+  const up = api.nextAgcState(0.01, { gain: 1, locked: true }, dt).gain - 1;
+  const down = 1 - api.nextAgcState(1.0, { gain: 1, locked: true }, dt).gain;
+  ok(down > up, `下げのほうが速く追従する（上げ ${up.toFixed(4)} < 下げ ${down.toFixed(4)}）`);
+
+  // 6) RMS 計算（フルスケール正弦波は 1/√2 ≒ 0.707）。
+  const sine = new Float32Array(1024);
+  for (let i = 0; i < sine.length; i++) sine[i] = Math.sin((2 * Math.PI * i) / 64);
+  ok(Math.abs(api.rmsOf(sine) - Math.SQRT1_2) < 0.01, "rmsOf: 正弦波の RMS が 1/√2");
+  ok(api.rmsOf(new Float32Array(256)) === 0, "rmsOf: 無音は 0");
+}
+
+// ====================================================================
 try {
+  testWebAgcCore();
   await testSingle();
   await testBothMixOk();
   await testMixFailThenRemix();
