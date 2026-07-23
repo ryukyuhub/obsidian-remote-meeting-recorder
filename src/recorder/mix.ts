@@ -16,8 +16,7 @@ export function runMix(
   sys: string,
   mic: string,
   out: string,
-  agc: "on" | "off",
-  normalize: "on" | "off" = "on"
+  agc: "on" | "off"
 ): Promise<boolean> {
   return new Promise((resolve) => {
     // 出力チャンネル数（1=モノラル / 2=ステレオ）。会議は L≒R になりがちなので既定はモノラル寄り。
@@ -34,9 +33,11 @@ export function runMix(
       out,
       "--agc",
       agc,
-      // 手動ミキサーは手動で焼いた per-source バランスを保つため正規化しない。
+      // 正規化はミックス全体に単一の静的ゲインを掛けるだけで、手動ミキサーで焼いた
+      // ソース間バランスは崩れない。手動時に off にしていたのは前提の誤りで、
+      // AutoGain オフ時にどこにもゲイン補正が無い状態を招いていた（Issue #4）。
       "--normalize",
-      normalize,
+      "on",
       "--channels",
       channels,
       // 出力ビットレート算出用（サンプルレートを下げると mix 出力も小さくなる）。
@@ -53,6 +54,45 @@ export function runMix(
     child.on("error", () => resolve(false));
     child.on("exit", (code) => {
       resolve(code === 0 && existsWithSize(out));
+    });
+  });
+}
+
+/**
+ * 単一ファイルの仕上げ正規化（`sysrec normalize`）。single ソース（system のみ／mic のみ）と
+ * 片系 rescue は mix を通らないため、AutoGain オフだとどこにもゲイン補正が掛からず
+ * 生レベルのまま出ていた（Issue #4）。その救済。
+ *
+ * tmp へ書いてから rename で差し替える（失敗時は元ファイルを温存＝録音を失わない）。
+ * 成否は返すが、失敗しても元ファイルは無傷なので呼び出し側は続行してよい。
+ */
+export function normalizeFile(bin: string, target: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const tmp = `${target}.norm.m4a`;
+    safeUnlink(tmp);
+    let child;
+    try {
+      child = spawn("caffeinate", ["-i", bin, "normalize", "--in", target, "--out", tmp], {
+        stdio: "ignore",
+      });
+    } catch {
+      resolve(false);
+      return;
+    }
+    child.on("error", () => resolve(false));
+    child.on("exit", (code) => {
+      if (code !== 0 || !existsWithSize(tmp)) {
+        safeUnlink(tmp);
+        resolve(false);
+        return;
+      }
+      try {
+        fs.renameSync(tmp, target);
+        resolve(true);
+      } catch {
+        safeUnlink(tmp);
+        resolve(false);
+      }
     });
   });
 }
@@ -102,17 +142,14 @@ export async function mixOrRescue(
   bin: string,
   out: string,
   agc: "on" | "off",
-  id: string,
-  manualMix = false
+  id: string
 ): Promise<MixOutcome> {
   const { sys, mic } = intermediatePaths(out);
   const sysE = existsWithSize(sys);
   const micE = existsWithSize(mic);
-  // Manual モードは正規化しない（手動バランスを保つ・リミッターのみ）。
-  const normalize: "on" | "off" = manualMix ? "off" : "on";
 
   if (sysE && micE) {
-    const ok = await runMix(ctx, bin, sys, mic, out, agc, normalize);
+    const ok = await runMix(ctx, bin, sys, mic, out, agc);
     if (!ok) return { kind: "mix-failed", sys, mic };
     safeUnlink(sys);
     safeUnlink(mic);
@@ -121,6 +158,8 @@ export async function mixOrRescue(
   }
   if (sysE || micE) {
     rescueRename(sys, mic, out);
+    // rescue は mix を通らない＝正規化されない。AGC も無ければ生レベルのままなので仕上げる。
+    if (agc === "off") await normalizeFile(bin, out);
     finalizeCleanup(ctx.paths, id);
     return { kind: "rescued" };
   }
@@ -145,7 +184,6 @@ export async function remix(ctx: RecorderContext, opts: RemixOptions): Promise<T
   let out = opts.outPath;
   let source: RecorderSource = "both";
   let agc: "on" | "off" = "on";
-  let manualMix = false;
 
   if (opts.sessionId) {
     const meta = readSessionMeta(sessionPaths(ctx.paths, opts.sessionId).json);
@@ -155,7 +193,6 @@ export async function remix(ctx: RecorderContext, opts: RemixOptions): Promise<T
     out = meta.out;
     source = meta.source;
     agc = meta.agc;
-    manualMix = !!meta.manualMix;
   }
   if (opts.agc) agc = opts.agc; // 引数優先
 
@@ -166,7 +203,7 @@ export async function remix(ctx: RecorderContext, opts: RemixOptions): Promise<T
     return { event: "remix-error", sessionId: id, message: "sysrec バイナリが見つかりません" };
   }
 
-  const outcome = await mixOrRescue(ctx, bin, out, agc, id, manualMix);
+  const outcome = await mixOrRescue(ctx, bin, out, agc, id);
   switch (outcome.kind) {
     case "mixed":
     case "rescued":

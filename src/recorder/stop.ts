@@ -4,7 +4,7 @@ import type { SessionMeta, TerminalEvent } from "../types";
 import { sessionPaths } from "../state/paths";
 import { readSessionMeta, finalizeCleanup } from "../state/sessionStore";
 import { isAlive } from "./spawn";
-import { mixOrRescue, savedTerminalEvent } from "./mix";
+import { mixOrRescue, normalizeFile, savedTerminalEvent } from "./mix";
 import { delay } from "../util/delay";
 import { existsWithSize, safeUnlink } from "../util/fsx";
 
@@ -78,7 +78,7 @@ async function doFinalize(ctx: RecorderContext, meta: SessionMeta): Promise<Term
   const durationSec = parseDurationSec(sp.status);
 
   if (meta.source === "both") {
-    const outcome = await mixOrRescue(ctx, meta.bin, meta.out, meta.agc, meta.id, !!meta.manualMix);
+    const outcome = await mixOrRescue(ctx, meta.bin, meta.out, meta.agc, meta.id);
     switch (outcome.kind) {
       case "mixed":
       case "rescued":
@@ -108,10 +108,15 @@ async function doFinalize(ctx: RecorderContext, meta: SessionMeta): Promise<Term
   }
 
   // single
-  finalizeCleanup(ctx.paths, meta.id);
   if (existsWithSize(meta.out)) {
+    // single は mix を通らない＝正規化されない。AGC も無い（AutoGain オフ・手動ミキサー）と
+    // どこにもゲイン補正が掛からず生レベルのまま出るので、ここで仕上げる（Issue #4）。
+    // 失敗しても元ファイルは無傷なのでそのまま stopped を返す。
+    if (meta.agc === "off") await normalizeFile(meta.bin, meta.out);
+    finalizeCleanup(ctx.paths, meta.id);
     return savedTerminalEvent("stopped", meta.id, meta.source, meta.out, durationSec);
   }
+  finalizeCleanup(ctx.paths, meta.id);
   return {
     event: "stop-warning",
     sessionId: meta.id,

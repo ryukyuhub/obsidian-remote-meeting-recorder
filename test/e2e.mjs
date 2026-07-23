@@ -260,6 +260,56 @@ async function testWatcherExternalStop() {
 }
 
 // ====================================================================
+// Issue #4: AutoGain オフ（手動ミキサー含む）は mix も AGC も通らないため、
+// single ソースでは停止時に仕上げの正規化を掛ける。失敗しても録音は失わない。
+async function testSingleNormalizeWhenAgcOff() {
+  console.log("\n[9] single + AutoGain オフ: 停止時に normalize を通す");
+  const { ctx, recDir, paths } = makeCtx("norm-off");
+  delete process.env.FAKE_NORMALIZE_FAIL;
+  const { sessionId, out } = await api.startRecording(ctx, {
+    ...startOpts(recDir, "mic", "norm1"),
+    agc: false,
+  });
+  const ev = await api.stopRecording(ctx, sessionId);
+  ok(ev.event === "stopped", `event=stopped（実際: ${ev.event}）`);
+  ok(exists(out), "最終 .m4a が存在");
+  ok(
+    fs.readFileSync(out, "utf8").includes("fake-normalized"),
+    "AutoGain オフの single は normalize 済みファイルに差し替わる"
+  );
+  ok(!exists(`${out}.norm.m4a`), "normalize の一時ファイルが残らない");
+  ok(!exists(api.sessionPaths(paths, sessionId).json), "停止後にセッション JSON が消える");
+}
+
+async function testSingleNoNormalizeWhenAgcOn() {
+  console.log("\n[10] single + AutoGain オン: normalize は掛けない（録音時 AGC 済み）");
+  const { ctx, recDir } = makeCtx("norm-on");
+  delete process.env.FAKE_NORMALIZE_FAIL;
+  const { sessionId, out } = await api.startRecording(ctx, startOpts(recDir, "mic", "norm2"));
+  const ev = await api.stopRecording(ctx, sessionId);
+  ok(ev.event === "stopped", `event=stopped（実際: ${ev.event}）`);
+  ok(
+    !fs.readFileSync(out, "utf8").includes("fake-normalized"),
+    "AGC オンでは normalize を通さない（無駄な再エンコードをしない）"
+  );
+}
+
+async function testNormalizeFailKeepsRecording() {
+  console.log("\n[11] normalize 失敗でも録音は失わない（元ファイル温存）");
+  const { ctx, recDir } = makeCtx("norm-fail");
+  const { sessionId, out } = await api.startRecording(ctx, {
+    ...startOpts(recDir, "mic", "norm3"),
+    agc: false,
+  });
+  process.env.FAKE_NORMALIZE_FAIL = "1";
+  const ev = await api.stopRecording(ctx, sessionId);
+  delete process.env.FAKE_NORMALIZE_FAIL;
+  ok(ev.event === "stopped", `normalize 失敗でも event=stopped（実際: ${ev.event}）`);
+  ok(exists(out) && ev.bytes > 0, "元の録音ファイルがそのまま残る");
+  ok(!exists(`${out}.norm.m4a`), "失敗した一時ファイルは掃除される");
+}
+
+// ====================================================================
 try {
   await testSingle();
   await testBothMixOk();
@@ -269,6 +319,9 @@ try {
   await testStartError();
   await testRestoreClassify();
   await testWatcherExternalStop();
+  await testSingleNormalizeWhenAgcOff();
+  await testSingleNoNormalizeWhenAgcOn();
+  await testNormalizeFailKeepsRecording();
 } catch (e) {
   console.error("\n予期しないエラー:", e);
   fail++;

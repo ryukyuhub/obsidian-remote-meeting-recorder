@@ -2,7 +2,9 @@
 # sysrec 契約再現スタブ（実録音なし・E2E 用）。
 #   録音: --out <p> --source <both|system|mic> --pidfile <p> --status-file <p> [他は無視]
 #   ミックス: mix --in <sys> --in <mic> --out <final> [--agc ...] [--channels 1|2]
+#   正規化: normalize --in <file> --out <file>
 # 環境変数: FAKE_NO_PIDFILE=1（pidfile を書かない=起動失敗）/ FAKE_MIX_FAIL=1（mix を失敗）
+#           FAKE_NORMALIZE_FAIL=1（normalize を失敗）
 
 emit() { # $1=status-file $2=json行
   printf '%s\n' "$2"
@@ -26,6 +28,27 @@ if [ "$1" = "mix" ]; then
   fi
   printf 'fake-mixed-audio\n' >"$OUT"
   echo '{"bytes":16,"durationSec":3,"event":"mixed","path":"'"$OUT"'"}'
+  exit 0
+fi
+
+# ---- normalize サブコマンド ----
+if [ "$1" = "normalize" ]; then
+  shift
+  IN=""; OUT=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --in) IN="$2"; shift 2 ;;
+      --out) OUT="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  if [ "$FAKE_NORMALIZE_FAIL" = "1" ]; then
+    echo "sysrec: fake normalize 失敗" >&2
+    exit 1
+  fi
+  # 実処理の代わりに「印を付けてコピー」（差し替えが起きたことを検証できるようにする）
+  { cat "$IN"; printf 'fake-normalized\n'; } >"$OUT"
+  echo '{"bytes":16,"durationSec":3,"event":"normalized","normGainDb":6,"path":"'"$OUT"'"}'
   exit 0
 fi
 

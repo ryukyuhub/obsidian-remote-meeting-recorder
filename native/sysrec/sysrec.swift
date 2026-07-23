@@ -256,6 +256,63 @@ final class StreamingLimiter {
     }
 }
 
+/// 最終ラウドネス正規化のゲイン（-16 dBFS 目標・0.125〜8.0＝±18 dB クランプ）。
+/// 400ms 窓の RMS を -42 dBFS でゲートして測る（無音/ノイズ床の窓を測定に含めないため）。
+///
+/// フォールバック（Issue #4）: 全窓がゲート未満＝素材全体が極小レベルのときは、
+/// 以前は「正規化しない」で終わっていた。AutoGain オフ／手動ミキサーはどこにも
+/// ゲイン補正が掛からないため、一番救済が要る素材ほど無補正で出る状態だった。
+/// そこでゲート無しの全体 RMS で測り直して持ち上げる。ただし実質デジタル無音
+/// （-74 dBFS 未満）はノイズを増幅するだけなので素通しする。
+func loudnessGain(_ buf: AVAudioPCMBuffer) -> Float {
+    let targetLoudRMS: Float = 0.158   // -16 dBFS
+    let win = 19200                    // 400ms @48k
+    let gateRMS: Float = 0.0079        // -42 dBFS
+    let frames = Int(buf.frameLength)
+    let chCount = Int(buf.format.channelCount)
+    guard frames > 0, chCount > 0, let data = buf.floatChannelData else { return 1 }
+    let st = buf.stride
+
+    var gatedEnergy: Double = 0        // ゲートを超えた窓のみ
+    var counted = 0
+    var allEnergy: Double = 0          // 全窓（フォールバック用）
+    var pos = 0
+    while pos < frames {
+        let nn = min(win, frames - pos)
+        var sum: Float = 0
+        for c in 0..<chCount {
+            let p = data[c]
+            for i in pos..<(pos + nn) { let v = p[i * st]; sum += v * v }
+        }
+        let rms = (sum / Float(nn * chCount)).squareRoot()
+        allEnergy += Double(rms * rms) * Double(nn)
+        if rms > gateRMS { gatedEnergy += Double(rms * rms) * Double(nn); counted += nn }
+        pos += nn
+    }
+
+    let rms: Float
+    if counted > 0 {
+        rms = Float((gatedEnergy / Double(counted)).squareRoot())
+    } else {
+        rms = Float((allEnergy / Double(frames)).squareRoot())
+        if rms < 0.0002 { return 1 }   // -74 dBFS 未満＝実質デジタル無音
+    }
+    guard rms > 0 else { return 1 }
+    return min(max(targetLoudRMS / rms, 0.125), 8.0)
+}
+
+/// バッファ全体へ静的ゲインを掛ける（正規化の適用）。
+func applyStaticGain(_ buf: AVAudioPCMBuffer, _ g: Float) {
+    let frames = Int(buf.frameLength)
+    let chCount = Int(buf.format.channelCount)
+    guard frames > 0, chCount > 0, let data = buf.floatChannelData else { return }
+    let st = buf.stride
+    for c in 0..<chCount {
+        let p = data[c]
+        for i in 0..<frames { p[i * st] *= g }
+    }
+}
+
 /// オフライン・ルックアヘッドリミッター（ミックス最終段）。5ms 先読みの
 /// スライディング最小値（単調キュー）で必要ゲインを先取りし、クリックなしで
 /// ピークを ceiling 以下へ抑える。リリース約 50ms。
@@ -359,8 +416,10 @@ final class NoiseGate {
 
 /// 1 つの音声ソース（system もしくは microphone）を AAC .m4a へ書き出す箱。
 /// 最初のサンプルが届いた時点で実フォーマット(ASBD)からライタを遅延生成する。
-/// agc=true なら Float32 PCM チャンクに AGC+リミッターを適用してから書き出す
+/// agc=true なら Float32 PCM チャンクに AGC を適用してから書き出す
 /// （対象外フォーマットは素通し）。gate=true（マイク）はさらにノイズゲートを掛ける。
+/// リミッターは AGC の有無に関わらず常時掛ける: 歪み（クリップ）防止はレベルの
+/// 自動調整とは別の機能で、AutoGain オフでも必要なため（Issue #2/#4）。
 final class WriterBox {
     let path: String
     let label: String                 // "system" / "microphone"
@@ -370,14 +429,13 @@ final class WriterBox {
     private var lastPTS: CMTime = .zero
     private var failed = false
     private let agc: AGCProcessor?
-    private let limiter: StreamingLimiter?
+    private let limiter = StreamingLimiter()
     private let noiseGate: NoiseGate?  // マイク（gate=true）かつ AGC 有効時のみ
 
     init(path: String, label: String, agc: Bool, gate: Bool = false, gateDb: Double = -40) {
         self.path = path
         self.label = label
         self.agc = agc ? AGCProcessor() : nil
-        self.limiter = agc ? StreamingLimiter() : nil
         self.noiseGate = (agc && gate) ? NoiseGate(thresholdDb: gateDb) : nil
     }
 
@@ -393,15 +451,14 @@ final class WriterBox {
         }
     }
 
-    /// AGC+リミッターを適用した新しい CMSampleBuffer を返す。AGC 無効・
+    /// AGC+リミッターを適用した新しい CMSampleBuffer を返す。
     /// Float32 LPCM 以外・変換失敗時は nil（呼び出し側が元バッファを使う）。
     /// ABL の取得は withAudioBufferList を使う（手動の
     /// CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer 直呼びはサイズ厳格化で
     /// -12737 を返すことがある）。取り出した blockBuffer は元バッファと同一メモリとは
     /// 限らないため、加工後は必ず新しい CMSampleBuffer に包み直して返す。
     private func processed(_ sb: CMSampleBuffer) -> CMSampleBuffer? {
-        guard let agc, let limiter,
-              let fmt = CMSampleBufferGetFormatDescription(sb),
+        guard let fmt = CMSampleBufferGetFormatDescription(sb),
               let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(fmt)?.pointee,
               asbd.mFormatID == kAudioFormatLinearPCM,
               asbd.mFormatFlags & kAudioFormatFlagIsFloat != 0,
@@ -427,8 +484,8 @@ final class WriterBox {
                 }
                 // ノイズゲート判定用に AGC 前の生 RMS を測る（マイクのみ）。
                 let rawRMS = self.noiseGate != nil ? NoiseGate.rms(chans, frames: frames, stride: stride) : 0
-                agc.process(chans, frames: frames, stride: stride, sampleRate: sr)
-                limiter.process(chans, frames: frames, stride: stride, sampleRate: sr)
+                self.agc?.process(chans, frames: frames, stride: stride, sampleRate: sr)
+                self.limiter.process(chans, frames: frames, stride: stride, sampleRate: sr)
                 // 無音（生入力が閾値未満）ならゲートで出力をほぼ 0 まで落とす。
                 self.noiseGate?.process(chans, frames: frames, stride: stride, sampleRate: sr, inputRMS: rawRMS)
 
@@ -1150,33 +1207,14 @@ func runMix(_ argv: [String]) -> Never {
         }
     }
 
-    // 3) 最終ラウドネス正規化 — 無音ゲート付き RMS を測り、静的ゲインで
-    //    目標 -16 dBFS へ寄せる（±18 dB でクランプ）。
+    // 3) 最終ラウドネス正規化 — 目標 -16 dBFS へ静的ゲインで寄せる（±18 dB クランプ）。
+    //    ミックス全体に単一ゲインを掛けるだけなので、手動ミキサーで焼いた
+    //    ソース間バランスは変わらない（手動時に off にする理由は無い・Issue #4）。
     var normGainDb: Double = 0
     if normalizeOn {
-        let targetLoudRMS: Float = 0.158  // -16 dBFS
-        let win = 19200                   // 400ms @48k
-        let dstL = mixed.floatChannelData![0]
-        let dstR = mixed.floatChannelData![1]
-        var energy: Double = 0
-        var counted = 0
-        var pos = 0
-        while pos < Int(n) {
-            let nn = min(win, Int(n) - pos)
-            var sum: Float = 0
-            for i in pos..<(pos + nn) { sum += dstL[i] * dstL[i] + dstR[i] * dstR[i] }
-            let rms = (sum / Float(nn * 2)).squareRoot()
-            // ゲート -42 dBFS。無音/ノイズ床の窓は測定に含めない（無音の合算を持ち上げないため）。
-            if rms > 0.0079 { energy += Double(rms * rms) * Double(nn); counted += nn }
-            pos += nn
-        }
-        if counted > 0 {
-            let rms = Float((energy / Double(counted)).squareRoot())
-            let g = min(max(targetLoudRMS / rms, 0.125), 8.0)
-            for ch in 0..<2 {
-                let dst = mixed.floatChannelData![ch]
-                for i in 0..<Int(n) { dst[i] *= g }
-            }
+        let g = loudnessGain(mixed)
+        if g != 1 {
+            applyStaticGain(mixed, g)
             normGainDb = 20 * log10(Double(g))
         }
     }
@@ -1232,6 +1270,71 @@ func runMix(_ argv: [String]) -> Never {
 }
 
 // ============================================================
+// 単一ファイルの仕上げ正規化（single ソース用・Issue #4）
+// ============================================================
+
+/// 1 ファイルをラウドネス正規化して書き戻す（`normalize --in <file> --out <file>`）。
+/// single ソース（system のみ／mic のみ）は mix を通らないため、AutoGain オフでは
+/// どこにもゲイン補正が掛からず生レベルのまま出ていた。その仕上げ段。
+/// mix と違い**再サンプルしない**（入力のサンプルレート/チャンネル数を保つ＝
+/// 容量設定とアーカイブ品質を変えない）。
+func runNormalize(_ argv: [String]) -> Never {
+    var input = ""
+    var out = ""
+    var i = 0
+    while i < argv.count {
+        switch argv[i] {
+        case "--in": i += 1; if i < argv.count { input = argv[i] }
+        case "--out": i += 1; if i < argv.count { out = argv[i] }
+        default: break
+        }
+        i += 1
+    }
+    guard !input.isEmpty, !out.isEmpty else {
+        die(1, "normalize: --in <file> と --out <file> を指定してください。")
+    }
+    guard let f = try? AVAudioFile(forReading: URL(fileURLWithPath: input)) else {
+        die(1, "normalize: 読み込み失敗 \(input)")
+    }
+    let fmt = f.processingFormat
+    guard f.length > 0,
+          let buf = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: AVAudioFrameCount(f.length)) else {
+        die(1, "normalize: バッファ確保に失敗 \(input)")
+    }
+    do { try f.read(into: buf) } catch { die(1, "normalize: read 失敗 \(input): \(error)") }
+    guard buf.frameLength > 0 else { die(1, "normalize: 入力が空です \(input)") }
+
+    let g = loudnessGain(buf)
+    if g != 1 { applyStaticGain(buf, g) }
+    // リミッター（シーリング -1 dBFS）は常時。持ち上げた結果のピークを抑える最終安全弁。
+    applyLookaheadLimiter(buf, ceiling: 0.891, sampleRate: fmt.sampleRate)
+
+    let outURL = URL(fileURLWithPath: out)
+    try? FileManager.default.removeItem(at: outURL)
+    let srOut = Int(fmt.sampleRate > 0 ? fmt.sampleRate : 48000)
+    let outSettings: [String: Any] = [
+        AVFormatIDKey: kAudioFormatMPEG4AAC,
+        AVSampleRateKey: fmt.sampleRate,
+        AVNumberOfChannelsKey: Int(fmt.channelCount),
+        AVEncoderBitRateKey: scaledBitrate(128000, sampleRate: srOut),
+    ]
+    do {
+        let outFile = try AVAudioFile(forWriting: outURL, settings: outSettings)
+        try outFile.write(from: buf)
+    } catch { die(4, "normalize: 書き出し失敗: \(error)") }
+
+    let bytes = ((try? FileManager.default.attributesOfItem(atPath: out))?[.size] as? Int64) ?? 0
+    let line: [String: Any] = ["event": "normalized", "path": out, "bytes": Int(bytes),
+                               "durationSec": Int(Double(buf.frameLength) / fmt.sampleRate),
+                               "normGainDb": ((20 * log10(Double(g))) * 10).rounded() / 10]
+    if let d = try? JSONSerialization.data(withJSONObject: line, options: [.sortedKeys]),
+       let s = String(data: d, encoding: .utf8) {
+        FileHandle.standardOutput.write(Data((s + "\n").utf8))
+    }
+    exit(0)
+}
+
+// ============================================================
 // エントリポイント
 // ============================================================
 
@@ -1267,6 +1370,9 @@ struct SysRec {
 
         // mix サブコマンド
         if argv.first == "mix" { runMix(Array(argv.dropFirst())) }
+
+        // normalize サブコマンド（single ソースの仕上げ・Issue #4）
+        if argv.first == "normalize" { runNormalize(Array(argv.dropFirst())) }
 
         let opt = parseRecordArgs(argv)
         guard !opt.out.isEmpty else { die(1, "--out <path> は必須です。") }

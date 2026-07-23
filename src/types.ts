@@ -14,7 +14,7 @@ export interface SessionMeta {
   platform: "darwin" | "win32";
   source: RecorderSource;
   agc: "on" | "off";
-  /** 手動ミキサー（Manual モード）で録音したか。remix 時に mix の agc/normalize を再現するため。 */
+  /** 手動ミキサー（Manual モード）で録音したか。復元時の UI 表示（フェーダーの有無）に使う。 */
   manualMix?: boolean;
   /** both のときは中間ファイルの base（拡張子込みの最終 .m4a パス）。single は最終ファイル。 */
   out: string;
