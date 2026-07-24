@@ -53,4 +53,14 @@
 4. テスト音源は PowerShell（`System.Windows.Media.MediaPlayer`）で既存 m4a を再生してループバックに流す
 5. `stop-recording` コマンドで停止 → ffmpeg（`~/.meeting-recorder/bin/ffmpeg.exe`）でチャンネル・レベル検証、sessions 後始末・ノート埋め込み・文字起こし挿入をファイルで確認
 
-代替手段: 公式 Obsidian CLI（1.12.7+、設定で有効化）は `obsidian command --id=<pluginId>:<commandId>` でプラグインコマンドを外部実行できるが、JS 評価（内部状態の検証）は CDP のみ可能。
+### 公式 Obsidian CLI（2026-07-25 導入済み・第一選択）
+
+Windows 開発機には公式 CLI をセットアップ済み（設定 → 一般 →「コマンドラインインターフェース」オン＋PATH 登録済み。実体は `C:\Users\kyan\AppData\Local\Programs\Obsidian\Obsidian.com`）。**デバッグポート付き再起動なしで**通常起動の Obsidian に対してコマンドを実行できる:
+
+```
+obsidian commands filter=remote-meeting          # プラグインコマンド一覧
+obsidian command id=remote-meeting-recorder:stop-recording
+obsidian vault=<name> <コマンド>                  # vault 明示（既定はアクティブ vault）
+```
+
+使い分け: **コマンド実行だけなら CLI**（手軽・通常起動のまま）、**内部状態の検証や `startRecordingFromView` の直接呼び出しが要るなら CDP**（`--remote-debugging-port=9222` で再起動が必要）。PATH 反映前のシェルや WSL インターオプからはフルパスで実行する。
