@@ -25,6 +25,7 @@ export { isAlive } from "./src/recorder/spawn";
 export { SessionWatcher } from "./src/recorder/watch";
 export { restoreInProgressSessions } from "./src/recorder/restore";
 export { nextAgcState, initialAgcState, rmsOf, AGC_TARGET_RMS, AGC_GATE_RMS, AGC_MAX_GAIN, AGC_MIN_GAIN } from "./src/recorder/agc";
+export { nextNormalizerState, initialNormalizerState, NORM_TARGET_RMS, NORM_GATE_RMS, NORM_MAX_GAIN, NORM_MIN_GAIN, NORM_WARMUP_SEC } from "./src/recorder/agc";
 `;
 const result = await build({
   stdin: { contents: entry, resolveDir: repoRoot, sourcefile: "e2e-entry.ts", loader: "ts" },
@@ -357,6 +358,85 @@ async function testNormalizeFailKeepsRecording() {
 }
 
 // ====================================================================
+// Windows の仕上げ正規化（取り込み時）。macOS の `sysrec normalize` に相当する段で、
+// 狙いは「録音レベルを OS の出力音量から独立させる」こと。Windows 実機が無いので、
+// 中核の純関数を数値で検証する。
+function testWebNormalizerCore() {
+  console.log("\n[13] Windows 仕上げ正規化の中核ロジック（出力音量からの独立）");
+  const dt = 0.1;
+
+  // ヘルパ: 一定 RMS を sec 秒ぶん流したあとの状態。
+  const feed = (rms, sec, s = api.initialNormalizerState()) => {
+    for (let i = 0; i < Math.round(sec / dt); i++) s = api.nextNormalizerState(rms, s, dt);
+    return s;
+  };
+
+  // 1) ウォームアップ中はゲインを動かさない（冒頭の一瞬で暴れない）。
+  const warm = feed(0.05, api.NORM_WARMUP_SEC - 0.3);
+  ok(warm.gain === 1, `有音 ${api.NORM_WARMUP_SEC}s 未満ではゲイン 1.0 のまま（実際: ${warm.gain}）`);
+
+  // 2) 十分流せば目標 -16 dBFS へ収束する。
+  const conv = feed(0.05, 40);
+  const want = api.NORM_TARGET_RMS / 0.05;
+  ok(
+    Math.abs(conv.gain - want) / want < 0.02,
+    `目標 -16 dBFS へ収束（狙い ${want.toFixed(2)} / 実際 ${conv.gain.toFixed(2)}）`
+  );
+
+  // 3) **これが本題**: 出力音量で入力が半分になっても、最終的な出力レベルは同じになる。
+  //    Windows のループバックは出力音量の影響を受けるため、ここが独立していないと困る。
+  const loud = feed(0.08, 40);
+  const quiet = feed(0.04, 40); // 出力音量を半分に絞った相当（-6 dB）
+  const outLoud = 0.08 * loud.gain;
+  const outQuiet = 0.04 * quiet.gain;
+  ok(
+    Math.abs(outLoud - outQuiet) / outLoud < 0.02,
+    `入力が半分でも出力レベルは一致＝出力音量から独立（${outLoud.toFixed(3)} vs ${outQuiet.toFixed(3)}）`
+  );
+
+  // 4) 上限クランプ +18 dB。ゲート超え(>0.0079)だが目標まで 8 倍以上要る入力で確認する。
+  const tiny = feed(0.01, 60);
+  ok(
+    Math.abs(tiny.gain - api.NORM_MAX_GAIN) / api.NORM_MAX_GAIN < 0.02,
+    `小さい入力は +18 dB でクランプ（実際: ${tiny.gain.toFixed(2)}）`
+  );
+  // 過大入力は下げる（RMS は 1.0 が上限なので下限クランプ -18dB には実際には届かない）。
+  const huge = feed(0.9, 60);
+  ok(
+    huge.gain < 0.2 && huge.gain >= api.NORM_MIN_GAIN,
+    `過大入力は下げる・下限を割らない（実際: ${huge.gain.toFixed(3)}）`
+  );
+
+  // 5) 出力音量を絞りすぎて素材全体がゲート(-42 dBFS)未満でも救済する（macOS と同じ）。
+  //    ここが無いと「一番救済が要る素材ほど無補正」になる（Issue #4 と同じ穴）。
+  const belowGate = feed(0.004, 60);
+  ok(
+    belowGate.gain > 4,
+    `全体がゲート未満でもゲート無しで測り直して持ち上げる（実際: ${belowGate.gain.toFixed(2)}）`
+  );
+
+  // 6) ただし実質デジタル無音（-74 dBFS 未満）は素通し（ノイズを増幅しない）。
+  const silent = feed(0.00005, 60);
+  ok(silent.gain === 1, `実質無音では素通し（実際: ${silent.gain}）`);
+
+  // 6) 無音区間は測定に含めない（会話の合間でゲインが動かない＝静的に保たれる）。
+  const speech = feed(0.05, 30);
+  const withGaps = feed(api.NORM_GATE_RMS / 2, 30, feed(0.05, 30));
+  ok(
+    Math.abs(withGaps.gain - speech.gain) / speech.gain < 0.02,
+    `無音を挟んでもゲインは動かない（${speech.gain.toFixed(3)} → ${withGaps.gain.toFixed(3)}）`
+  );
+
+  // 7) 収束後は安定＝静的ゲインとして振る舞う（累積平均なので後半ほど動かない）。
+  const a = feed(0.05, 60);
+  const b = feed(0.05, 10, a);
+  ok(
+    Math.abs(b.gain - a.gain) / a.gain < 0.005,
+    `収束後は静的（60s: ${a.gain.toFixed(4)} → 70s: ${b.gain.toFixed(4)}）`
+  );
+}
+
+// ====================================================================
 // Windows(Web Audio) の AGC 中核。macOS の sysrec AGCProcessor と同じ挙動になっているかを
 // 数値で確認する（Windows 実機が無くても回帰を検出できるようにするため）。
 function testWebAgcCore() {
@@ -402,6 +482,7 @@ function testWebAgcCore() {
 // ====================================================================
 try {
   testWebAgcCore();
+  testWebNormalizerCore();
   await testSingle();
   await testBothMixOk();
   await testMixFailThenRemix();

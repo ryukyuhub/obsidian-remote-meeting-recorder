@@ -51,6 +51,98 @@ export function nextAgcState(rms: number, prev: AgcState, dtSec: number): AgcSta
   return Math.abs(gain - 1) < 0.05 ? { gain: 1, locked: false } : { gain, locked: prev.locked };
 }
 
+// ============================================================
+// 仕上げ正規化（Windows 版）
+// ============================================================
+//
+// macOS は停止後に `sysrec normalize` でファイル全体を測って -16 dBFS へ揃える。Windows は
+// MediaRecorder が最終ファイルを直接書くうえ、Chromium が **AAC をエンコードできない**ため
+// （実測: AudioEncoder は opus のみ対応）、.m4a を保ったままの保存時正規化ができない。
+//
+// そこで取り込み時に等価なことをする。狙いは「録音レベルを OS の出力音量から独立させる」こと。
+// Windows のシステム音声は WASAPI ループバック＝出力ミックスを拾うので、出力音量を下げると
+// 取り込みも小さくなる（macOS の Core Audio タップは音量つまみより手前なので影響しない）。
+// その減衰は録音中ほぼ一定なので、**累積測定から収束する静的ゲイン**で正しく打ち消せる。
+//
+// AGC との違い（両方掛かる。macOS も 録音時 AGC → 保存時 normalize の二段）:
+//   - AGC は「時間方向のばらつき」を均す。速く動き、無音では 1.0 へ戻る。
+//   - こちらは「録音全体の音量」を目標へ寄せる。累積平均なので時間とともに動かなくなる。
+// AutoGain のオン/オフに関わらず常時掛ける（macOS の normalize が常時なのと同じ）。
+
+/** 目標 RMS = -16 dBFS（macOS の loudnessGain と同じ）。 */
+export const NORM_TARGET_RMS = 0.158;
+/** 測定ゲート = -42 dBFS。これ未満の窓は「無音／ノイズ床」として測定に含めない。 */
+export const NORM_GATE_RMS = 0.0079;
+/** ゲインのクランプ = ±18 dB（macOS と同じ）。 */
+export const NORM_MIN_GAIN = 0.125;
+export const NORM_MAX_GAIN = 8.0;
+/** 実質デジタル無音（-74 dBFS 未満）は素通し（ノイズを増幅するだけなので）。 */
+export const NORM_SILENCE_RMS = 0.0002;
+/** これだけ有音を蓄積するまでゲインを動かさない（冒頭の一瞬で暴れないため）。 */
+export const NORM_WARMUP_SEC = 1.5;
+/**
+ * ゲート超えが溜まらないまま、これだけ経過したらゲート無しで測り直す（macOS と同じ救済）。
+ * 出力音量を絞りすぎて素材全体が -42 dBFS を下回ると、ゲート測定では 1 秒も溜まらず
+ * 「一番救済が要る素材ほど無補正」になる。ウォームアップより十分長く取り、通常の会話で
+ * こちらが先に発火しないようにする。
+ */
+export const NORM_FALLBACK_SEC = 10;
+/** 収束の時定数（秒）。目標自体が累積で安定するので、耳に付かない速さで寄せれば足りる。 */
+export const NORM_TAU_SEC = 1.0;
+
+export interface NormalizerState {
+  /** 現在の静的ゲイン（線形）。 */
+  gain: number;
+  /** ゲートを超えた窓の Σ(rms²·dt) と合計秒数。 */
+  gatedEnergy: number;
+  gatedSec: number;
+  /** 全窓の Σ(rms²·dt) と合計秒数（全部ゲート未満だったときのフォールバック用）。 */
+  allEnergy: number;
+  allSec: number;
+}
+
+export function initialNormalizerState(): NormalizerState {
+  return { gain: 1, gatedEnergy: 0, gatedSec: 0, allEnergy: 0, allSec: 0 };
+}
+
+/**
+ * 1 tick 進めた次の状態を返す（純関数・状態は書き換えない）。
+ * @param rms **AGC 適用後**のチャンク RMS（0..1）。macOS の normalize が「AGC 済みの録音
+ *            ファイル」を測るのと同じ位置で測るため、測定点は AGC の後ろに置く。
+ */
+export function nextNormalizerState(
+  rms: number,
+  prev: NormalizerState,
+  dtSec: number
+): NormalizerState {
+  const next: NormalizerState = {
+    gain: prev.gain,
+    gatedEnergy: prev.gatedEnergy,
+    gatedSec: prev.gatedSec,
+    allEnergy: prev.allEnergy + rms * rms * dtSec,
+    allSec: prev.allSec + dtSec,
+  };
+  if (rms > NORM_GATE_RMS) {
+    next.gatedEnergy += rms * rms * dtSec;
+    next.gatedSec += dtSec;
+  }
+  // 測定値を決める。原則はゲート済み（無音・ノイズ床を測定に含めない）。
+  let measured: number;
+  if (next.gatedSec >= NORM_WARMUP_SEC) {
+    measured = Math.sqrt(next.gatedEnergy / next.gatedSec);
+  } else if (next.allSec >= NORM_FALLBACK_SEC) {
+    // 救済: ゲート超えが溜まらない＝素材全体が -42 dBFS 未満。出力音量を絞りすぎた場合が
+    // これに当たる。ゲート無しで測り直して持ち上げる（macOS の loudnessGain と同じ）。
+    measured = Math.sqrt(next.allEnergy / next.allSec);
+    if (measured < NORM_SILENCE_RMS) return next; // 実質デジタル無音は素通し
+  } else {
+    return next; // まだ判断材料が足りない＝ゲインを動かさない
+  }
+  const desired = Math.min(Math.max(NORM_TARGET_RMS / measured, NORM_MIN_GAIN), NORM_MAX_GAIN);
+  next.gain = prev.gain + (desired - prev.gain) * (1 - Math.exp(-dtSec / NORM_TAU_SEC));
+  return next;
+}
+
 /** 時間領域サンプル列の RMS（0..1）。 */
 export function rmsOf(samples: Float32Array): number {
   if (samples.length === 0) return 0;

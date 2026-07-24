@@ -11,7 +11,15 @@
 import * as fs from "fs";
 import { statBytes } from "../util/fsx";
 import { getElectronRemote } from "../platform/electron";
-import { initialAgcState, nextAgcState, rmsOf, type AgcState } from "./agc";
+import {
+  initialAgcState,
+  initialNormalizerState,
+  nextAgcState,
+  nextNormalizerState,
+  rmsOf,
+  type AgcState,
+  type NormalizerState,
+} from "./agc";
 import type { RecorderSource } from "../types";
 
 // --- Electron remote の最小型（platform/electron.ts 経由で取得） -----------------
@@ -99,17 +107,29 @@ const SILENCE_WATCH_INTERVAL_MS = 500;
 /** AGC の更新周期（ms）。macOS はキャプチャチャンク単位なので、それに近い粒度にする。 */
 const AGC_TICK_MS = 100;
 
-/** 1 ソース分の処理チェーン: source → gain(手動) → agcGain(自動) → limiter → dest。 */
+/**
+ * 1 ソース分の処理チェーン:
+ *   source → gain(手動) → agcGain(自動) → normGain(仕上げ正規化) → limiter → dest
+ * 測定タップは 2 箇所。`analyser` は手動フェーダー直後（メーター表示と AGC 入力）、
+ * `postAgcAnalyser` は AGC 直後（正規化の入力）。macOS の normalize が「AGC 済みの録音
+ * ファイル」を測るのと同じ位置に合わせるため、正規化だけ測定点が後ろになる。
+ */
 interface SourceChain {
   /** 手動ミキサーのフェーダー。 */
   gain: GainNode;
   /** AGC が動かすゲイン（AutoGain オフなら 1.0 のまま）。 */
   agcGain: GainNode;
+  /** 仕上げ正規化の静的ゲイン（AutoGain のオン/オフに関わらず常時動く）。 */
+  normGain: GainNode;
   /** 手動フェーダー直後のタップ（メーター表示と AGC 測定の両方に使う）。 */
   analyser: AnalyserNode;
+  /** AGC 直後のタップ（正規化の測定用・行き止まり）。 */
+  postAgcAnalyser: AnalyserNode;
   meterData: Uint8Array<ArrayBuffer>;
   rmsData: Float32Array<ArrayBuffer>;
+  postRmsData: Float32Array<ArrayBuffer>;
   agc: AgcState;
+  norm: NormalizerState;
 }
 
 /**
@@ -233,17 +253,29 @@ export class WebRecorder {
       analyser.fftSize = 256;
       const agcGain = this.audioCtx!.createGain();
       agcGain.gain.value = 1;
+      // 仕上げ正規化。AGC の後ろ・リミッターの手前に置く（macOS の 録音時AGC → normalize →
+      // リミッター と同じ並び）。持ち上げた結果のピークは後段のリミッターが抑える。
+      const normGain = this.audioCtx!.createGain();
+      normGain.gain.value = 1;
+      const postAgcAnalyser = this.audioCtx!.createAnalyser();
+      postAgcAnalyser.fftSize = 256;
       node.connect(gain);
       gain.connect(analyser);
       gain.connect(agcGain);
-      agcGain.connect(limiter);
+      agcGain.connect(postAgcAnalyser); // 測定用の分岐（行き止まり）
+      agcGain.connect(normGain);
+      normGain.connect(limiter);
       return {
         gain,
         agcGain,
+        normGain,
         analyser,
+        postAgcAnalyser,
         meterData: new Uint8Array(new ArrayBuffer(analyser.frequencyBinCount)),
         rmsData: new Float32Array(new ArrayBuffer(analyser.fftSize * 4)),
+        postRmsData: new Float32Array(new ArrayBuffer(postAgcAnalyser.fftSize * 4)),
         agc: initialAgcState(),
+        norm: initialNormalizerState(),
       };
     };
     this.sysChain = connectSource(this.systemStream, this.initSysGainDb);
@@ -378,23 +410,37 @@ export class WebRecorder {
    * AGCProcessor と同一ロジック）で次のゲインを決めて GainNode へ流し込む。
    * AutoGain オフ／手動ミキサーのときは動かさない（agcGain は 1.0 のまま＝素通し）。
    */
+  /**
+   * レベル処理の tick。AGC は AutoGain オンのときだけ、仕上げ正規化は**常時**動かす
+   * （macOS の normalize が AutoGain のオン/オフに関わらず掛かるのと揃える）。
+   * どちらも走らない構成は無いので、タイマーは無条件に起動する。
+   */
   private startAgc(): void {
-    if (!this.agc) return;
     const tick = () => {
       if (this.stopped) return;
-      this.stepAgc(this.sysChain);
-      this.stepAgc(this.micChain);
+      this.stepLevels(this.sysChain);
+      this.stepLevels(this.micChain);
       this.agcTimer = window.setTimeout(tick, AGC_TICK_MS);
     };
     this.agcTimer = window.setTimeout(tick, AGC_TICK_MS);
   }
 
-  private stepAgc(chain: SourceChain | null): void {
+  private stepLevels(chain: SourceChain | null): void {
     if (!chain || !this.audioCtx) return;
-    chain.analyser.getFloatTimeDomainData(chain.rmsData);
-    chain.agc = nextAgcState(rmsOf(chain.rmsData), chain.agc, AGC_TICK_MS / 1000);
-    // ゲイン変更は setTargetAtTime で滑らかに当てる（急変のジッパーノイズを避ける）。
-    chain.agcGain.gain.setTargetAtTime(chain.agc.gain, this.audioCtx.currentTime, 0.05);
+    const dt = AGC_TICK_MS / 1000;
+    const now = this.audioCtx.currentTime;
+
+    if (this.agc) {
+      chain.analyser.getFloatTimeDomainData(chain.rmsData);
+      chain.agc = nextAgcState(rmsOf(chain.rmsData), chain.agc, dt);
+      // ゲイン変更は setTargetAtTime で滑らかに当てる（急変のジッパーノイズを避ける）。
+      chain.agcGain.gain.setTargetAtTime(chain.agc.gain, now, 0.05);
+    }
+
+    // 仕上げ正規化は AGC 適用後を測る（macOS が AGC 済みファイルを測るのと同じ位置）。
+    chain.postAgcAnalyser.getFloatTimeDomainData(chain.postRmsData);
+    chain.norm = nextNormalizerState(rmsOf(chain.postRmsData), chain.norm, dt);
+    chain.normGain.gain.setTargetAtTime(chain.norm.gain, now, 0.05);
   }
 
   /** Analyser から周波数ビン平均で 0..1 のレベルを読む。 */
