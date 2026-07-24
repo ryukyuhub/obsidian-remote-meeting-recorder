@@ -43,6 +43,8 @@ import { TranscribeOptionsModal } from "./ui/TranscribeOptionsModal";
 
 // Notice 表示時間（ms）。長め＝内容を読ませたい警告 / エラー＝失敗通知。
 const NOTICE_LONG_MS = 10000;
+/** macOS 無音ウォッチ: 開始からこの時間レベル 0 のままなら警告（BT 立ち上がり猶予込み）。 */
+const SILENCE_WATCH_MS = 10000;
 const NOTICE_ERROR_MS = 8000;
 
 /** ビューが操作する前面録音の情報（primary）。 */
@@ -109,6 +111,7 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
   private controlWindow: ControlWindowManager | null = null;
   // 手動ミキサー: sysrec の level ファイルを読むポーラーと、現在のソース別ゲイン(dB)。
   private levelPoller: LevelPoller | null = null;
+  private silenceWatchTimer: number | null = null;
   private mixerGain = { systemDb: 0, micDb: 0 };
 
   async onload(): Promise<void> {
@@ -258,6 +261,7 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
     this.controlWindow = null;
     this.stopMicTap();
     this.stopLevelPoller();
+    this.stopSilenceWatch();
   }
 
   // ================================================================
@@ -395,8 +399,44 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
       const level = sessionPaths(this.buildContext().paths, meta.id).level;
       this.levelPoller = new LevelPoller(level);
       this.levelPoller.start();
+      this.startSilenceWatch(meta);
     }
     this.maybeOpenControlWindow();
+  }
+
+  /**
+   * macOS の無音ウォッチ（Windows は WebRecorder 内に同等の 5 秒ウォッチあり）。
+   * 開始から 10 秒、録音対象ソースのレベルが 0 のままなら Notice で知らせる。
+   * BT イヤホンの死に状態などで「録れているつもりが無音」だった実害（2026-07-24）への防御。
+   * レベルは sysrec が書く level ファイル（取り込み実測 RMS）を LevelPoller 経由で読む。
+   */
+  private startSilenceWatch(meta: SessionMeta): void {
+    this.stopSilenceWatch();
+    const checkSystem = meta.source !== "mic";
+    const checkMic = meta.source !== "system";
+    this.silenceWatchTimer = window.setTimeout(() => {
+      this.silenceWatchTimer = null;
+      if (this.activeRecording?.sessionId !== meta.id) return; // 既に停止/別セッション
+      const lv = this.levelPoller?.levels();
+      if (!lv) return;
+      const dead: string[] = [];
+      if (checkSystem && lv.system <= 0) dead.push("システム音声");
+      if (checkMic && lv.mic <= 0) dead.push("マイク");
+      if (dead.length > 0) {
+        new Notice(
+          `⚠ ${dead.join("と")}のレベルが 0 のままです。音声が取り込めていない可能性があります` +
+            `（出力デバイスの接続状態・マイク権限・入力デバイスを確認してください）。録音自体は継続しています。`,
+          NOTICE_LONG_MS
+        );
+      }
+    }, SILENCE_WATCH_MS);
+  }
+
+  private stopSilenceWatch(): void {
+    if (this.silenceWatchTimer != null) {
+      window.clearTimeout(this.silenceWatchTimer);
+      this.silenceWatchTimer = null;
+    }
   }
 
   // ================================================================
@@ -564,6 +604,7 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
       this.activeRecording = null;
       this.stopMicTap();
       this.stopLevelPoller();
+      this.stopSilenceWatch();
       this.controlWindow?.close();
     }
 

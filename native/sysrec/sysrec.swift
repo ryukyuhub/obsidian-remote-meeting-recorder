@@ -65,7 +65,19 @@ final class Emitter {
 /// **CLI 契約を壊す変更を入れたらここを上げる**（新引数の追加だけなら据え置きでよい）。
 /// abi 2 = タップ方式のシステム音取り込み＋control/level ファイル＋normalize サブコマンド。
 let sysrecAbi = 2
-let sysrecVersion = "0.6.1"
+let sysrecVersion = "0.7.1"
+
+/// 仕上げ正規化の仕様定数（loudnessGain と `dsp-spec` の共有・単一の真実の源）。
+/// TypeScript 側（src/recorder/agc.ts の NORM_*）と一致していることを
+/// E2E の契約テストが `sysrec dsp-spec` 経由で検証する。値を変えるときは両方直すこと。
+enum NormSpec {
+    static let targetRMS: Float = 0.158   // -16 dBFS
+    static let gateRMS: Float = 0.0079    // -42 dBFS（測定ゲート）
+    static let minGain: Float = 0.125     // -18 dB
+    static let maxGain: Float = 8.0       // +18 dB
+    static let silenceRMS: Float = 0.0002 // -74 dBFS 未満は素通し
+    static let ceiling: Float = 0.891     // 仕上げリミッターのシーリング（-1 dBFS）
+}
 
 func logErr(_ s: String) { FileHandle.standardError.write(Data((s + "\n").utf8)) }
 
@@ -272,9 +284,9 @@ final class StreamingLimiter {
 /// そこでゲート無しの全体 RMS で測り直して持ち上げる。ただし実質デジタル無音
 /// （-74 dBFS 未満）はノイズを増幅するだけなので素通しする。
 func loudnessGain(_ buf: AVAudioPCMBuffer) -> Float {
-    let targetLoudRMS: Float = 0.158   // -16 dBFS
+    let targetLoudRMS = NormSpec.targetRMS
     let win = 19200                    // 400ms @48k
-    let gateRMS: Float = 0.0079        // -42 dBFS
+    let gateRMS = NormSpec.gateRMS
     let frames = Int(buf.frameLength)
     let chCount = Int(buf.format.channelCount)
     guard frames > 0, chCount > 0, let data = buf.floatChannelData else { return 1 }
@@ -302,10 +314,10 @@ func loudnessGain(_ buf: AVAudioPCMBuffer) -> Float {
         rms = Float((gatedEnergy / Double(counted)).squareRoot())
     } else {
         rms = Float((allEnergy / Double(frames)).squareRoot())
-        if rms < 0.0002 { return 1 }   // -74 dBFS 未満＝実質デジタル無音
+        if rms < NormSpec.silenceRMS { return 1 }   // -74 dBFS 未満＝実質デジタル無音
     }
     guard rms > 0 else { return 1 }
-    return min(max(targetLoudRMS / rms, 0.125), 8.0)
+    return min(max(targetLoudRMS / rms, NormSpec.minGain), NormSpec.maxGain)
 }
 
 /// バッファ全体へ静的ゲインを掛ける（正規化の適用）。
@@ -734,6 +746,17 @@ final class TapCapturer {
     private var aggID = AudioObjectID(kAudioObjectUnknown)
     private var ioProc: AudioDeviceIOProcID?
     private var srcFormat: AVAudioFormat?
+    private var tapUUID = ""
+    private var currentOutUID = ""
+    private var stopped = false
+    /// 再構築はすべてこのシリアルキューで行う（IOProc の張り替えが競合しないように）。
+    /// 既定出力の変更リスナーもこのキューで受ける。
+    private let rebuildQueue = DispatchQueue(label: "sysrec.tap.rebuild")
+    private var pendingRebuild: DispatchWorkItem?
+    private var listenerBlock: AudioObjectPropertyListenerBlock?
+    private var listenerAddr = AudioObjectPropertyAddress(
+        mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+        mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
 
     init(onBuffer: @escaping (AVAudioPCMBuffer) -> Void) { self.onBuffer = onBuffer }
 
@@ -751,10 +774,39 @@ final class TapCapturer {
         desc.name = "sysrec system tap"
         desc.isPrivate = true
         desc.muteBehavior = .unmuted
+        tapUUID = desc.uuid.uuidString
 
         guard AudioHardwareCreateProcessTap(desc, &tapID) == noErr, tapID != 0 else {
             throw CaptureError.msg("システム音声タップを作成できませんでした（オーディオ録音の権限を確認してください）。")
         }
+        do { try refreshTapFormat() } catch {
+            AudioHardwareDestroyProcessTap(tapID)
+            throw error
+        }
+
+        guard let outUID = TapCapturer.defaultOutputUID() else {
+            AudioHardwareDestroyProcessTap(tapID)
+            throw CaptureError.msg("デフォルト出力デバイスを取得できませんでした。")
+        }
+        do { try buildAggregate(outUID) } catch {
+            AudioHardwareDestroyProcessTap(tapID)
+            throw error
+        }
+
+        // 既定出力デバイスの変更を監視する（Issue: 録音中の BT イヤホン接続/切断・出力切替で
+        // 以降のシステム音が録れなくなる）。集約デバイスは outUID に固定でぶら下がるため、
+        // 既定出力が変わったら集約デバイスと IOProc を作り直して追従する。タップ自体は生かす
+        // ので録音は継続し、切替の瞬間に数百 ms 欠ける程度で済む。
+        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            self?.scheduleRebuild()
+        }
+        listenerBlock = block
+        AudioObjectAddPropertyListenerBlock(sys, &listenerAddr, rebuildQueue, block)
+    }
+
+    /// タップの現フォーマットを読み直す（出力デバイスが変わるとサンプルレートが変わり得る:
+    /// 例 BT 44.1kHz ⇔ 内蔵 48kHz。下流の FormatNormalizer はフォーマット変化を見て作り直す）。
+    private func refreshTapFormat() throws {
         var asbd = AudioStreamBasicDescription()
         var asz = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
         var faddr = AudioObjectPropertyAddress(
@@ -762,15 +814,13 @@ final class TapCapturer {
             mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
         guard AudioObjectGetPropertyData(tapID, &faddr, 0, nil, &asz, &asbd) == noErr,
               let fmt = AVAudioFormat(streamDescription: &asbd) else {
-            AudioHardwareDestroyProcessTap(tapID)
             throw CaptureError.msg("タップの音声フォーマットを取得できませんでした。")
         }
         srcFormat = fmt
+    }
 
-        guard let outUID = TapCapturer.defaultOutputUID() else {
-            AudioHardwareDestroyProcessTap(tapID)
-            throw CaptureError.msg("デフォルト出力デバイスを取得できませんでした。")
-        }
+    /// 集約デバイス＋IOProc を outUID にぶら下げて構築・開始する（start と再構築の共通部）。
+    private func buildAggregate(_ outUID: String) throws {
         let aggDesc: [String: Any] = [
             kAudioAggregateDeviceNameKey as String: "sysrec aggregate",
             kAudioAggregateDeviceUIDKey as String: "sysrec-agg-\(getpid())",
@@ -779,12 +829,11 @@ final class TapCapturer {
             kAudioAggregateDeviceIsStackedKey as String: false,
             kAudioAggregateDeviceSubDeviceListKey as String: [[kAudioSubDeviceUIDKey as String: outUID]],
             kAudioAggregateDeviceTapListKey as String: [[
-                kAudioSubTapUIDKey as String: desc.uuid.uuidString,
+                kAudioSubTapUIDKey as String: tapUUID,
                 kAudioSubTapDriftCompensationKey as String: true,
             ]],
         ]
         guard AudioHardwareCreateAggregateDevice(aggDesc as CFDictionary, &aggID) == noErr, aggID != 0 else {
-            AudioHardwareDestroyProcessTap(tapID)
             throw CaptureError.msg("集約デバイスを作成できませんでした。")
         }
 
@@ -798,24 +847,72 @@ final class TapCapturer {
             self.onBuffer(pcm)
         }
         guard AudioDeviceCreateIOProcIDWithBlock(&ioProc, aggID, nil, block) == noErr, let proc = ioProc else {
-            AudioHardwareDestroyAggregateDevice(aggID); AudioHardwareDestroyProcessTap(tapID)
+            AudioHardwareDestroyAggregateDevice(aggID); aggID = 0
             throw CaptureError.msg("IOProc を作成できませんでした。")
         }
         guard AudioDeviceStart(aggID, proc) == noErr else {
-            AudioDeviceDestroyIOProcID(aggID, proc)
-            AudioHardwareDestroyAggregateDevice(aggID); AudioHardwareDestroyProcessTap(tapID)
+            AudioDeviceDestroyIOProcID(aggID, proc); ioProc = nil
+            AudioHardwareDestroyAggregateDevice(aggID); aggID = 0
             throw CaptureError.msg("システム音声タップを開始できませんでした。")
         }
+        currentOutUID = outUID
     }
 
-    /// 停止/破棄は順序厳守（Stop → DestroyIOProcID → DestroyAggregate → DestroyProcessTap）。
-    func stop() {
+    /// 集約デバイス側だけ畳む（タップは生かす・再構築用）。
+    private func teardownAggregate() {
         if let proc = ioProc {
             AudioDeviceStop(aggID, proc)
             AudioDeviceDestroyIOProcID(aggID, proc)
             ioProc = nil
         }
         if aggID != 0 { AudioHardwareDestroyAggregateDevice(aggID); aggID = 0 }
+    }
+
+    /// デバイス変更イベントを 300ms デバウンスして再構築する（BT 切替時はイベントが連発するため）。
+    private func scheduleRebuild() {
+        pendingRebuild?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.rebuildNow() }
+        pendingRebuild = work
+        rebuildQueue.asyncAfter(deadline: .now() + 0.3, execute: work)
+    }
+
+    /// 実際の再構築（rebuildQueue 上で実行）。失敗時は 1 秒後に 1 回だけ自動再試行し、
+    /// それでもダメなら次のデバイス変更イベントに任せる（イベントは必ずまた来る）。
+    private func rebuildNow(isRetry: Bool = false) {
+        if stopped { return }
+        guard let newUID = TapCapturer.defaultOutputUID() else {
+            logErr("システム音: 既定出力を取得できず再接続を保留（デバイス遷移中の可能性）")
+            if !isRetry {
+                rebuildQueue.asyncAfter(deadline: .now() + 1.0) { [weak self] in self?.rebuildNow(isRetry: true) }
+            }
+            return
+        }
+        let oldUID = currentOutUID
+        teardownAggregate()
+        do {
+            try refreshTapFormat()
+            try buildAggregate(newUID)
+            logErr("システム音: 出力デバイス変更に追従して再接続（\(oldUID) → \(newUID)）")
+        } catch {
+            logErr("システム音: 再接続に失敗（\(error)）。1秒後に再試行します")
+            if !isRetry {
+                rebuildQueue.asyncAfter(deadline: .now() + 1.0) { [weak self] in self?.rebuildNow(isRetry: true) }
+            }
+        }
+    }
+
+    /// 停止/破棄は順序厳守（リスナー除去 → Stop → DestroyIOProcID → DestroyAggregate → DestroyProcessTap）。
+    func stop() {
+        stopped = true
+        if let block = listenerBlock {
+            AudioObjectRemovePropertyListenerBlock(
+                AudioObjectID(kAudioObjectSystemObject), &listenerAddr, rebuildQueue, block)
+            listenerBlock = nil
+        }
+        pendingRebuild?.cancel()
+        // 進行中の再構築があれば完了を待ってから畳む（IOProc の二重破棄を防ぐ）。
+        rebuildQueue.sync {}
+        teardownAggregate()
         if tapID != 0 { AudioHardwareDestroyProcessTap(tapID); tapID = 0 }
     }
 
@@ -969,6 +1066,7 @@ final class Capture {
     private var tap: TapCapturer?
     private var mic: MicCapturer?
     private var sysNorm: FormatNormalizer?
+    private var sysNormSrc: AVAudioFormat?
     private var micNorm: FormatNormalizer?
     private var sysFrames: Int64 = 0
     private var micFrames: Int64 = 0
@@ -1029,11 +1127,17 @@ final class Capture {
     }
 
     // system: タップ由来の PCM を目標フォーマットへ正規化し、連番 PTS で sysBox へ。
+    // 出力デバイス切替でタップのフォーマットが変わり得る（BT 44.1kHz ⇔ 内蔵 48kHz）ので、
+    // 入力フォーマットの変化を検知したら変換器を作り直す（据え置くと変換エラー＝無音になる）。
     private func handleSystem(_ pcm: AVAudioPCMBuffer) {
         if stopping { return }
-        if sysNorm == nil {
+        if sysNorm == nil || sysNormSrc != pcm.format {
+            if sysNormSrc != nil && sysNormSrc != pcm.format {
+                logErr("システム音: 取り込みフォーマット変化（\(Int(sysNormSrc?.sampleRate ?? 0))Hz → \(Int(pcm.format.sampleRate))Hz）に追従")
+            }
             sysNorm = FormatNormalizer(from: pcm.format, sampleRate: Double(opt.sampleRate),
                                        channels: AVAudioChannelCount(max(1, opt.channels)))
+            sysNormSrc = pcm.format
         }
         guard let out = sysNorm?.convert(pcm), out.frameLength > 0 else { return }
         // 手動ゲイン適用（Auto 時は 0dB＝素通し）＋メーター用 RMS を取得。
@@ -1227,7 +1331,7 @@ func runMix(_ argv: [String]) -> Never {
     }
 
     // 4) ルックアヘッドリミッター（シーリング -1 dBFS）— 常時有効の最終安全弁。
-    applyLookaheadLimiter(mixed, ceiling: 0.891, sampleRate: target.sampleRate)
+    applyLookaheadLimiter(mixed, ceiling: NormSpec.ceiling, sampleRate: target.sampleRate)
 
     // 5) 出力チャンネル数。内部処理は常に 2ch で行い、モノラル指定なら最後に
     //    L/R を平均して 1ch へダウンミックスする（会議は L≒R になりがちで、
@@ -1322,7 +1426,7 @@ func runNormalize(_ argv: [String]) -> Never {
     }
     applyStaticGain(buf, g)
     // リミッター（シーリング -1 dBFS）は常時。持ち上げた結果のピークを抑える最終安全弁。
-    applyLookaheadLimiter(buf, ceiling: 0.891, sampleRate: fmt.sampleRate)
+    applyLookaheadLimiter(buf, ceiling: NormSpec.ceiling, sampleRate: fmt.sampleRate)
 
     let outURL = URL(fileURLWithPath: out)
     try? FileManager.default.removeItem(at: outURL)
@@ -1363,6 +1467,35 @@ struct SysRec {
         if argv.first == "--version" || argv.first == "version" {
             let line: [String: Any] = ["abi": sysrecAbi, "version": sysrecVersion]
             if let d = try? JSONSerialization.data(withJSONObject: line, options: [.sortedKeys]),
+               let s = String(data: d, encoding: .utf8) {
+                print(s)
+            }
+            exit(0)
+        }
+
+        // DSP 仕様の申告（契約テスト用）。レベル処理の定数は Swift（本体）と TypeScript
+        // （Windows 経路 src/recorder/agc.ts）に二重実装されており、片側だけ変わる事故が
+        // 実際に起きた（Issue #4 系）。E2E がこの出力と TS 定数を突き合わせて一致を保証する。
+        if argv.first == "dsp-spec" {
+            let spec: [String: Any] = [
+                "abi": sysrecAbi,
+                "version": sysrecVersion,
+                "agc": [
+                    "targetRms": AGCProcessor.targetRMS,
+                    "gateRms": AGCProcessor.gateRMS,
+                    "minGain": AGCProcessor.minGain,
+                    "maxGain": AGCProcessor.maxGain,
+                ],
+                "norm": [
+                    "targetRms": NormSpec.targetRMS,
+                    "gateRms": NormSpec.gateRMS,
+                    "minGain": NormSpec.minGain,
+                    "maxGain": NormSpec.maxGain,
+                    "silenceRms": NormSpec.silenceRMS,
+                    "limiterCeiling": NormSpec.ceiling,
+                ],
+            ]
+            if let d = try? JSONSerialization.data(withJSONObject: spec, options: [.sortedKeys]),
                let s = String(data: d, encoding: .utf8) {
                 print(s)
             }
