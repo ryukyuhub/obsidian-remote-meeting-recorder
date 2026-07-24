@@ -38,6 +38,7 @@ export async function startWebRecording(
     micDevice: o.micDevice,
     mimeType: fmt.mimeType,
     sampleRate: o.sampleRate ?? ctx.settings.sampleRate,
+    channels: o.channels ?? ctx.settings.channels,
     agc: o.agc,
     manualMix: o.manualMix,
     systemGainDb: o.systemGainDb,

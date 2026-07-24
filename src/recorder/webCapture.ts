@@ -60,15 +60,20 @@ export function pickAudioFormat(): { mimeType: string; ext: string } {
 }
 
 /**
- * サンプルレートに見合った AAC ビットレート（bps）を返す。
+ * サンプルレート・チャンネル数に見合った AAC ビットレート（bps）を返す。
  * M4A(AAC) のファイルサイズはサンプルレートではなくビットレートで決まるため、
  * サンプルレートを下げたら合わせてビットレートも下げないとファイルは小さくならない。
  * （低サンプルレート＝帯域が狭いので低ビットレートで十分。）
+ * モノラルも同様で、実際のサイズ削減はここのビットレート半減（下限 48kbps）で実現する。
  */
-export function bitrateForSampleRate(sampleRate: number): number {
-  if (sampleRate <= 16000) return 48000; // 文字起こし相当・小容量
-  if (sampleRate <= 24000) return 64000; // 標準品質・約半分
-  return 128000; // 48000Hz 高音質（既定）
+export function bitrateForSampleRate(sampleRate: number, channels = 2): number {
+  const stereo =
+    sampleRate <= 16000
+      ? 48000 // 文字起こし相当・小容量
+      : sampleRate <= 24000
+        ? 64000 // 標準品質・約半分
+        : 128000; // 48000Hz 高音質（既定）
+  return channels === 1 ? Math.max(48000, stereo / 2) : stereo;
 }
 
 export interface WebRecorderOptions {
@@ -81,6 +86,11 @@ export interface WebRecorderOptions {
   mimeType: string;
   /** 録音サンプルレート（Hz）。省略時は AudioContext 既定（通常デバイス値）。 */
   sampleRate?: number;
+  /**
+   * チャンネル数（1=モノラル / 2=ステレオ）。モノラルは出力段で明示ダウンミックスする。
+   * 実サンプルレートと違い、チャンネル数はループバック無音化の危険なく強制できる。
+   */
+  channels?: number;
   /**
    * AutoGain（AGC）。macOS の `--agc on` と同じ意味で、Web Audio 側でも
    * 目標 -20 dBFS・最大 +12 dB のレベル自動調整を掛ける。手動ミキサー時は false。
@@ -142,6 +152,7 @@ export class WebRecorder {
   private readonly micDevice?: string;
   private readonly mimeType: string;
   private readonly sampleRate?: number;
+  private readonly channels?: number;
   private readonly manualMix: boolean;
   private readonly agc: boolean;
   private readonly onTerminated?: () => void;
@@ -179,6 +190,7 @@ export class WebRecorder {
     this.micDevice = o.micDevice;
     this.mimeType = o.mimeType;
     this.sampleRate = o.sampleRate;
+    this.channels = o.channels;
     this.manualMix = !!o.manualMix;
     // 手動ミキサーは AGC と排他（macOS の argv 組み立てと同じ規則）。
     this.agc = !!o.agc && !o.manualMix;
@@ -226,6 +238,12 @@ export class WebRecorder {
       );
     }
     const dest = (this.dest = this.audioCtx.createMediaStreamDestination());
+    // チャンネル数設定の反映。モノラルは出力段の明示ダウンミックスで実現する
+    // （サンプルレートと違い AudioContext を触らないので、ループバック無音化の危険がない）。
+    if (this.channels === 1) {
+      dest.channelCount = 1;
+      dest.channelCountMode = "explicit";
+    }
 
     // 最終段のリミッター（歪み＝クリップ防止）。macOS の StreamingLimiter に相当し、
     // AutoGain のオン/オフに関わらず**常時**掛ける（歪み防止はレベル自動調整とは別機能）。
@@ -288,11 +306,14 @@ export class WebRecorder {
     });
 
     // MediaRecorder。timeslice ごとに ondataavailable → ディスクへ順序保証で追記。
-    // 設定サンプルレートに見合ったビットレートを指定 → ファイルサイズがこれで実際に縮む。
+    // 設定サンプルレート・チャンネル数に見合ったビットレートを指定 → ファイルサイズがこれで実際に縮む。
     // （録音自体はデバイス既定レートで行い、サイズはビットレートで制御する。）
     const opts: MediaRecorderOptions = {};
     if (this.mimeType) opts.mimeType = this.mimeType;
-    opts.audioBitsPerSecond = bitrateForSampleRate(this.sampleRate ?? this.audioCtx.sampleRate);
+    opts.audioBitsPerSecond = bitrateForSampleRate(
+      this.sampleRate ?? this.audioCtx.sampleRate,
+      this.channels ?? 2
+    );
     this.recorder = new MediaRecorder(dest.stream, opts);
     this.recorder.ondataavailable = (e) => {
       if (e.data && e.data.size > 0) this.enqueueChunk(e.data);
