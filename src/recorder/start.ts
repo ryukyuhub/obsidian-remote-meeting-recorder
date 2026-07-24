@@ -8,6 +8,11 @@ import { sweepOrphans } from "./sweep";
 import { isAlive, pollPidFile, spawnCaffeinate, spawnDetached } from "./spawn";
 import { defaultFilename } from "../util/time";
 import { ensureDir, exists, safeUnlink, tailFile } from "../util/fsx";
+import {
+  isSysrecCompatible,
+  probeSysrecVersion,
+  sysrecIncompatibleMessage,
+} from "../util/sysrecVersion";
 
 export interface StartResult {
   sessionId: string;
@@ -42,6 +47,14 @@ export async function startRecording(
     throw new StartError(
       "sysrec バイナリが見つかりません。設定または診断（doctor）で確認してください。"
     );
+  }
+
+  // 0. バイナリの版数照合。古いバイナリは引数を黙って無視して 0 バイトの出力を作り、
+  //    停止時に「録音ファイルが生成されませんでした」という原因の分からない形で表面化する。
+  //    録音を始める前に、直せる形で止める。
+  const ver = probeSysrecVersion(bin);
+  if (!isSysrecCompatible(ver)) {
+    throw new StartError(sysrecIncompatibleMessage(ver, bin));
   }
 
   // 1. 孤児掃除（開始前に状態をきれいにする）

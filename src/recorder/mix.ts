@@ -6,6 +6,9 @@ import { sessionPaths } from "../state/paths";
 import { readSessionMeta, finalizeCleanup } from "../state/sessionStore";
 import { existsWithSize, intermediatePaths, safeUnlink, statBytes } from "../util/fsx";
 
+/** `sysrec normalize` の終了コード: 変更が ±1 dB 未満で書き出しを省いた（成功扱い）。 */
+const NORMALIZE_UNCHANGED = 3;
+
 /**
  * オフライン mix。`caffeinate -i` で包んで実行し、終了コード + 出力ファイルで成否判定。
  * `mixed` イベントは status-file に出ない癖があるため、イベントはパースしない（設計書 §4.3）。
@@ -60,8 +63,12 @@ export function runMix(
 
 /**
  * 単一ファイルの仕上げ正規化（`sysrec normalize`）。single ソース（system のみ／mic のみ）と
- * 片系 rescue は mix を通らないため、AutoGain オフだとどこにもゲイン補正が掛からず
- * 生レベルのまま出ていた（Issue #4）。その救済。
+ * 片系 rescue は mix を通らないため、どこにもゲイン補正が掛からず生レベルで出ていた（Issue #4）。
+ *
+ * AutoGain の有無で掛け分けない。録音時 AGC はゲート（-42 dBFS）未満に反応しないので、
+ * 「AGC オンだから補正済み」とは限らず、実測では AutoGain オンの system 単独が
+ * オフより 18 dB 小さくなっていた。代わりに sysrec 側が「変更が ±1 dB 未満」なら
+ * 終了コード 3 で書き出しを省くので、既に整っている素材が再エンコードされることはない。
  *
  * tmp へ書いてから rename で差し替える（失敗時は元ファイルを温存＝録音を失わない）。
  * 成否は返すが、失敗しても元ファイルは無傷なので呼び出し側は続行してよい。
@@ -81,6 +88,12 @@ export function normalizeFile(bin: string, target: string): Promise<boolean> {
     }
     child.on("error", () => resolve(false));
     child.on("exit", (code) => {
+      // 3 = 変更不要。元ファイルが既に目標レベルなのでそのまま使う（成功扱い）。
+      if (code === NORMALIZE_UNCHANGED) {
+        safeUnlink(tmp);
+        resolve(true);
+        return;
+      }
       if (code !== 0 || !existsWithSize(tmp)) {
         safeUnlink(tmp);
         resolve(false);
@@ -158,8 +171,9 @@ export async function mixOrRescue(
   }
   if (sysE || micE) {
     rescueRename(sys, mic, out);
-    // rescue は mix を通らない＝正規化されない。AGC も無ければ生レベルのままなので仕上げる。
-    if (agc === "off") await normalizeFile(bin, out);
+    // rescue は mix を通らない＝正規化されない。AGC の有無に関わらず仕上げる
+    // （変更不要なら sysrec 側が書き出しを省く）。
+    await normalizeFile(bin, out);
     finalizeCleanup(ctx.paths, id);
     return { kind: "rescued" };
   }

@@ -60,6 +60,13 @@ final class Emitter {
     }
 }
 
+/// CLI 契約（引数・サブコマンド・出力ファイルの取り決め）のバージョン。
+/// プラグインが `--version` で照合し、古いバイナリを掴んでいたら録音を始めずに知らせる。
+/// **CLI 契約を壊す変更を入れたらここを上げる**（新引数の追加だけなら据え置きでよい）。
+/// abi 2 = タップ方式のシステム音取り込み＋control/level ファイル＋normalize サブコマンド。
+let sysrecAbi = 2
+let sysrecVersion = "0.6.1"
+
 func logErr(_ s: String) { FileHandle.standardError.write(Data((s + "\n").utf8)) }
 
 func die(_ code: Int32, _ message: String) -> Never {
@@ -1305,7 +1312,15 @@ func runNormalize(_ argv: [String]) -> Never {
     guard buf.frameLength > 0 else { die(1, "normalize: 入力が空です \(input)") }
 
     let g = loudnessGain(buf)
-    if g != 1 { applyStaticGain(buf, g) }
+    // 変更が微小（±1 dB 未満）なら書き出さずに終了コード 3 で知らせる。呼び出し側は
+    // 元ファイルをそのまま使う＝意味の無い再エンコードで音質と時間を捨てない。
+    // これにより「AutoGain オンなら normalize を掛けない」という条件分岐を廃止でき、
+    // AGC のゲート（-42 dBFS）を下回って AGC が効かなかった素材も救えるようになる。
+    if abs(20 * log10(Double(g))) < 1.0 {
+        logErr("normalize: 変更不要（\(((20 * log10(Double(g))) * 10).rounded() / 10) dB）")
+        exit(3)
+    }
+    applyStaticGain(buf, g)
     // リミッター（シーリング -1 dBFS）は常時。持ち上げた結果のピークを抑える最終安全弁。
     applyLookaheadLimiter(buf, ceiling: 0.891, sampleRate: fmt.sampleRate)
 
@@ -1342,6 +1357,17 @@ func runNormalize(_ argv: [String]) -> Never {
 struct SysRec {
     static func main() {
         let argv = Array(CommandLine.arguments.dropFirst())
+
+        // バージョン申告（プラグインの互換チェック用）。古いバイナリはこれを知らないので
+        // die(1) で落ちる＝「応答が無い＝古い」と判定できる。
+        if argv.first == "--version" || argv.first == "version" {
+            let line: [String: Any] = ["abi": sysrecAbi, "version": sysrecVersion]
+            if let d = try? JSONSerialization.data(withJSONObject: line, options: [.sortedKeys]),
+               let s = String(data: d, encoding: .utf8) {
+                print(s)
+            }
+            exit(0)
+        }
 
         // 権限プリフライト（録音を開始せずマイク/オーディオ録音許可の有無だけ返す。doctor 用）
         // タップ移行により画面収録権限は不要。マイク（AVAudioEngine）の許可を確認する。

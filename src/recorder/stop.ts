@@ -109,10 +109,12 @@ async function doFinalize(ctx: RecorderContext, meta: SessionMeta): Promise<Term
 
   // single
   if (existsWithSize(meta.out)) {
-    // single は mix を通らない＝正規化されない。AGC も無い（AutoGain オフ・手動ミキサー）と
-    // どこにもゲイン補正が掛からず生レベルのまま出るので、ここで仕上げる（Issue #4）。
+    // single は mix を通らない＝正規化されない。AutoGain の有無で掛け分けない:
+    // 録音時 AGC はゲート（-42 dBFS）未満に反応しないので「AGC オン＝補正済み」は成り立たず、
+    // 実測で AutoGain オンの system 単独がオフより 18 dB 小さくなっていた（Issue #4）。
+    // 既に目標レベルなら sysrec が終了コード 3 で書き出しを省くため無駄な再エンコードは無い。
     // 失敗しても元ファイルは無傷なのでそのまま stopped を返す。
-    if (meta.agc === "off") await normalizeFile(meta.bin, meta.out);
+    await normalizeFile(meta.bin, meta.out);
     finalizeCleanup(ctx.paths, meta.id);
     return savedTerminalEvent("stopped", meta.id, meta.source, meta.out, durationSec);
   }

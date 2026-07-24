@@ -4,6 +4,12 @@ import * as path from "path";
 import * as fs from "fs";
 import type { RecorderContext } from "../context";
 import { binCandidates } from "../util/resolveBin";
+import {
+  isSysrecCompatible,
+  probeSysrecVersion,
+  sysrecIncompatibleMessage,
+  REQUIRED_SYSREC_ABI,
+} from "../util/sysrecVersion";
 import { getElectronRemote } from "../platform/electron";
 import { pickAudioFormat } from "../recorder/webCapture";
 import { execFileAsync } from "../util/exec";
@@ -206,6 +212,27 @@ export function runDoctor(ctx: RecorderContext): DoctorCheck[] {
     status: "ok",
     detail: `検出: ${binPath}（${found.origin}）`,
   });
+
+  // 2.5 版数照合。バイナリは main.js と別配布なので「本体だけ更新」が起き得る。
+  // 古いバイナリは新しい引数を黙って無視して 0 バイトの録音を作るため、存在だけ見て
+  // ok にしていると原因不明の録音失敗になる。ここで NG にして取得ボタンを出す。
+  const sysrecVer = probeSysrecVersion(binPath);
+  if (!isSysrecCompatible(sysrecVer)) {
+    checks.push({
+      id: "binary-version",
+      label: "sysrec バージョン",
+      status: "ng",
+      detail: sysrecIncompatibleMessage(sysrecVer, binPath),
+      fix: downloadFix,
+    });
+  } else {
+    checks.push({
+      id: "binary-version",
+      label: "sysrec バージョン",
+      status: "ok",
+      detail: `v${sysrecVer.version}（abi ${sysrecVer.abi} / 要求 ${REQUIRED_SYSREC_ABI} 以上）`,
+    });
+  }
 
   // 3〜6.5 バイナリのプローブ（実行権限/署名/arch/quarantine/デバイス）
   checks.push(...binaryProbeChecks(binPath, found.executable));

@@ -282,17 +282,63 @@ async function testSingleNormalizeWhenAgcOff() {
   ok(!exists(api.sessionPaths(paths, sessionId).json), "停止後にセッション JSON が消える");
 }
 
-async function testSingleNoNormalizeWhenAgcOn() {
-  console.log("\n[10] single + AutoGain オン: normalize は掛けない（録音時 AGC 済み）");
+// 録音時 AGC はゲート（-42 dBFS）未満に反応しないので「AGC オン＝補正済み」は成り立たない。
+// 実測で AutoGain オンの system 単独がオフより 18 dB 小さくなっていたため、AutoGain の
+// 有無に関わらず normalize を通す（無駄な再エンコードは sysrec 側の exit 3 で防ぐ）。
+async function testSingleNormalizeWhenAgcOn() {
+  console.log("\n[10] single + AutoGain オン: normalize を通す（AGC はゲート未満に効かないため）");
   const { ctx, recDir } = makeCtx("norm-on");
   delete process.env.FAKE_NORMALIZE_FAIL;
   const { sessionId, out } = await api.startRecording(ctx, startOpts(recDir, "mic", "norm2"));
   const ev = await api.stopRecording(ctx, sessionId);
   ok(ev.event === "stopped", `event=stopped（実際: ${ev.event}）`);
   ok(
-    !fs.readFileSync(out, "utf8").includes("fake-normalized"),
-    "AGC オンでは normalize を通さない（無駄な再エンコードをしない）"
+    fs.readFileSync(out, "utf8").includes("fake-normalized"),
+    "AutoGain オンでも single は normalize 済みファイルに差し替わる"
   );
+  ok(!exists(`${out}.norm.m4a`), "normalize の一時ファイルが残らない");
+}
+
+// 既に目標レベルなら sysrec は書き出しを省いて exit 3 を返す。呼び出し側は元ファイルを
+// そのまま使う（＝意味の無い再エンコードをしない）。
+async function testNormalizeUnchangedKeepsOriginal() {
+  console.log("\n[10b] normalize が「変更不要」(exit 3) なら元ファイルを据え置く");
+  const { ctx, recDir } = makeCtx("norm-skip");
+  const { sessionId, out } = await api.startRecording(ctx, startOpts(recDir, "mic", "norm2b"));
+  process.env.FAKE_NORMALIZE_UNCHANGED = "1";
+  const ev = await api.stopRecording(ctx, sessionId);
+  delete process.env.FAKE_NORMALIZE_UNCHANGED;
+  ok(ev.event === "stopped", `event=stopped（実際: ${ev.event}）`);
+  ok(
+    !fs.readFileSync(out, "utf8").includes("fake-normalized"),
+    "変更不要なら差し替えず元ファイルのまま"
+  );
+  ok(exists(out) && ev.bytes > 0, "録音ファイルは残る");
+  ok(!exists(`${out}.norm.m4a`), "一時ファイルが残らない");
+}
+
+// バイナリはプラグイン本体と別配布なので「main.js だけ更新」が起きる。古いバイナリは
+// 新しい引数を黙って無視して 0 バイトの録音を作るため、録音を始める前に弾く。
+async function testOldBinaryRejectedAtStart() {
+  console.log("\n[10c] 古い sysrec は録音開始前に弾く（版数ハンドシェイク）");
+  const { ctx, recDir, paths } = makeCtx("old-bin");
+  process.env.FAKE_OLD_BINARY = "1";
+  let err = null;
+  try {
+    await api.startRecording(ctx, startOpts(recDir, "mic", "oldbin"));
+  } catch (e) {
+    err = e;
+  } finally {
+    delete process.env.FAKE_OLD_BINARY;
+  }
+  ok(err !== null, "古いバイナリでは startRecording が失敗する");
+  ok(
+    err && /古い/.test(err.message) && /sysrec を取得/.test(err.message),
+    "原因と直し方（sysrec を取得）を伝える文言になっている"
+  );
+  // sysrec を起動する前に弾くので、セッションディレクトリすら作られない。
+  const leftovers = exists(paths.sessionsDir) ? fs.readdirSync(paths.sessionsDir) : [];
+  ok(leftovers.length === 0, "起動前に弾くのでセッションを残さない");
 }
 
 async function testNormalizeFailKeepsRecording() {
@@ -365,7 +411,9 @@ try {
   await testRestoreClassify();
   await testWatcherExternalStop();
   await testSingleNormalizeWhenAgcOff();
-  await testSingleNoNormalizeWhenAgcOn();
+  await testSingleNormalizeWhenAgcOn();
+  await testNormalizeUnchangedKeepsOriginal();
+  await testOldBinaryRejectedAtStart();
   await testNormalizeFailKeepsRecording();
 } catch (e) {
   console.error("\n予期しないエラー:", e);
