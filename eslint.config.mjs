@@ -32,9 +32,9 @@ export default tseslint.config(
   },
   {
     rules: {
-      // UI 文言は日本語なので英語のセンテンスケース規則は適用外。Obsidian の
-      // release dashboard でも sentence-case は非ブロッキング（warning）扱い。
-      "obsidianmd/ui/sentence-case": "warn",
+      // UI 文言は日本語なので英語のセンテンスケース規則は適用外（「RMR」等の
+      // 略称にも誤検知する）。Obsidian の release dashboard でも非ブロッキング。
+      "obsidianmd/ui/sentence-case": "off",
       // --- typescript-eslint の型安全系: 助言的・非ブロッキング ---
       "@typescript-eslint/no-unsafe-member-access": "warn",
       "@typescript-eslint/no-unsafe-assignment": "warn",

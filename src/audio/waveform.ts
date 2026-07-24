@@ -12,7 +12,7 @@ export class WaveformRenderer {
     private canvas: HTMLCanvasElement,
     private getLevel: () => number
   ) {
-    this.bars = new Array(this.count).fill(0);
+    this.bars = new Array<number>(this.count).fill(0);
   }
 
   start(): void {

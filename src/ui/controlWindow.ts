@@ -1,10 +1,13 @@
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
-import { getElectronRemote } from "../platform/electron";
+import {
+  getElectronRemote,
+  type BrowserWindowLike,
+  type ElectronRemoteLike,
+  type IpcMainLike,
+} from "../platform/electron";
 import { CONTROL_WINDOW_HTML } from "./controlWindowHtml";
-
-/* eslint-disable @typescript-eslint/no-explicit-any -- Electron の remote API（BrowserWindow/ipcMain 等）は型情報が乏しく any 経由で扱う */
 
 export interface ControlWindowConfig {
   source: string;
@@ -35,10 +38,10 @@ const CH_GAIN = "rmr:gain"; // 子 → 親（フェーダー操作）
  * unload/停止で確実に破棄（ゾンビ窓防止）。remote 不在環境では open()=false。
  */
 export class ControlWindowManager {
-  private win: any = null;
-  private ipcMain: any = null;
-  private stopHandler: ((...args: any[]) => void) | null = null;
-  private gainHandler: ((...args: any[]) => void) | null = null;
+  private win: BrowserWindowLike | null = null;
+  private ipcMain: IpcMainLike | null = null;
+  private stopHandler: ((...args: unknown[]) => void) | null = null;
+  private gainHandler: ((...args: unknown[]) => void) | null = null;
   private levelTimer: number | null = null;
 
   open(
@@ -47,8 +50,9 @@ export class ControlWindowManager {
     getSourceLevels: () => SourceLevels,
     onGain: (which: "system" | "mic", db: number) => void
   ): boolean {
-    const remote = getElectronRemote() as any;
-    if (!remote?.BrowserWindow) return false;
+    const remote = getElectronRemote() as ElectronRemoteLike | null;
+    const BrowserWindow = remote?.BrowserWindow;
+    if (!remote || !BrowserWindow) return false;
     this.close(); // 既存があれば閉じる
 
     // HTML はバンドル埋め込み → 一時ファイルへ書き出して file: で読む（同梱漏れに強い）
@@ -72,8 +76,9 @@ export class ControlWindowManager {
       /* 位置は既定に任せる */
     }
 
+    let win: BrowserWindowLike;
     try {
-      this.win = new remote.BrowserWindow({
+      win = new BrowserWindow({
         width: W,
         height: H,
         x,
@@ -98,22 +103,24 @@ export class ControlWindowManager {
       this.win = null;
       return false;
     }
+    this.win = win;
 
     try {
-      this.win.setAlwaysOnTop(true, "screen-saver");
-      this.win.setVisibleOnAllWorkspaces?.(true, { visibleOnFullScreen: true });
+      win.setAlwaysOnTop(true, "screen-saver");
+      win.setVisibleOnAllWorkspaces?.(true, { visibleOnFullScreen: true });
     } catch {
       /* 非対応なら無視 */
     }
 
-    this.win.loadFile(htmlPath);
-    this.win.webContents.on("did-finish-load", () => this.safeSend(CH_CONFIG, config));
+    win.loadFile(htmlPath);
+    win.webContents.on("did-finish-load", () => this.safeSend(CH_CONFIG, config));
 
     // 停止・ゲイン操作（子 → 親）: ipcMain 経由で親レンダラのハンドラを呼ぶ
     this.ipcMain = remote.ipcMain ?? null;
     if (this.ipcMain) {
       this.stopHandler = () => onStop();
-      this.gainHandler = (_e: unknown, msg: { which?: string; db?: number }) => {
+      this.gainHandler = (...args: unknown[]) => {
+        const msg = args[1] as { which?: unknown; db?: unknown } | undefined;
         if ((msg?.which === "system" || msg?.which === "mic") && typeof msg.db === "number") {
           onGain(msg.which, msg.db);
         }
@@ -129,7 +136,7 @@ export class ControlWindowManager {
     // ソース別レベル送出（親 → 子・~16fps）
     this.levelTimer = window.setInterval(() => this.safeSend(CH_LEVEL, getSourceLevels()), 60);
 
-    this.win.on("closed", () => this.cleanup());
+    win.on("closed", () => this.cleanup());
     return true;
   }
 

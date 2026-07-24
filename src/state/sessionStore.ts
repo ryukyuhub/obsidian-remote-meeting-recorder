@@ -18,9 +18,11 @@ export function writeSessionMeta(paths: StatePaths, meta: SessionMeta): void {
 /** セッションメタを読む。壊れた JSON は null（= corrupt 扱い → sweep 対象）。 */
 export function readSessionMeta(jsonPath: string): SessionMeta | null {
   try {
-    const obj = JSON.parse(fs.readFileSync(jsonPath, "utf8"));
-    if (!obj || typeof obj.id !== "string" || typeof obj.pid !== "number") return null;
-    if (typeof obj.out !== "string" || typeof obj.source !== "string") return null;
+    const obj: unknown = JSON.parse(fs.readFileSync(jsonPath, "utf8"));
+    if (!obj || typeof obj !== "object") return null;
+    const m = obj as Record<string, unknown>;
+    if (typeof m.id !== "string" || typeof m.pid !== "number") return null;
+    if (typeof m.out !== "string" || typeof m.source !== "string") return null;
     return obj as SessionMeta;
   } catch {
     return null;

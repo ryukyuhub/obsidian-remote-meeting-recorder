@@ -14,12 +14,12 @@ export async function listMicDevices(bin: string): Promise<MicDevice[]> {
   if (!bin) return [];
   try {
     const { stdout } = await execFileAsync(bin, ["list-devices"], { timeout: 5000 });
-    const arr = JSON.parse(stdout);
+    const arr: unknown = JSON.parse(stdout);
     if (!Array.isArray(arr)) return [];
-    return arr.filter(
-      (d): d is MicDevice =>
-        d && typeof d.uid === "string" && typeof d.name === "string"
-    );
+    return arr.filter((d: unknown): d is MicDevice => {
+      const o = d as { uid?: unknown; name?: unknown } | null;
+      return !!o && typeof o.uid === "string" && typeof o.name === "string";
+    });
   } catch {
     return [];
   }

@@ -13,7 +13,7 @@ import { safeUnlink } from "../util/fsx";
 
 export function readArrayBuffer(p: string): ArrayBuffer {
   const buf = fs.readFileSync(p);
-  return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) as ArrayBuffer;
+  return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
 }
 
 /**

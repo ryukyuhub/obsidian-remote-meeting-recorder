@@ -212,7 +212,7 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
     );
 
     // 描画された音声埋め込みを右クリック（閲覧ビュー・ライブプレビュー）
-    this.registerDomEvent(document, "contextmenu", (evt) => {
+    this.registerDomEvent(activeDocument, "contextmenu", (evt) => {
       const target = evt.target as HTMLElement | null;
       const embed = target?.closest?.(".internal-embed") as HTMLElement | null;
       const src = embed?.getAttribute("src");
@@ -247,7 +247,11 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
   // 設定・コンテキスト
   // ================================================================
   async loadSettings(): Promise<void> {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    this.settings = Object.assign(
+      {},
+      DEFAULT_SETTINGS,
+      (await this.loadData()) as Partial<RMRSettings> | null
+    );
   }
 
   async saveSettings(): Promise<void> {
@@ -280,12 +284,12 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
   async openRecordingView(): Promise<void> {
     const existing = this.app.workspace.getLeavesOfType(RECORDING_VIEW_TYPE);
     if (existing.length > 0) {
-      this.app.workspace.revealLeaf(existing[0]);
+      await this.app.workspace.revealLeaf(existing[0]);
       return;
     }
     const leaf: WorkspaceLeaf | null = this.app.workspace.getLeaf(true);
     await leaf.setViewState({ type: RECORDING_VIEW_TYPE, active: true });
-    this.app.workspace.revealLeaf(leaf);
+    await this.app.workspace.revealLeaf(leaf);
   }
 
   /** ノート右クリック「ここに会議録音を埋め込む」から: 録音ビューを開き、そのノートを埋め込み先にする。 */
@@ -561,7 +565,8 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
     if (!this.settings.enableControlWindow || !this.activeRecording) return;
     if (!this.controlWindow) this.controlWindow = new ControlWindowManager();
     const accent =
-      getComputedStyle(document.body).getPropertyValue("--interactive-accent").trim() || "#7c6cf0";
+      getComputedStyle(activeDocument.body).getPropertyValue("--interactive-accent").trim() ||
+      "#7c6cf0";
     const ok = this.controlWindow.open(
       {
         source: this.activeRecording.source,

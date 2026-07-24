@@ -2,10 +2,9 @@ import { FuzzySuggestModal, Notice, TFile } from "obsidian";
 import * as path from "path";
 import type RemoteMeetingRecorderPlugin from "../main";
 import { getVaultBasePath } from "../context";
-import { getElectronRemote } from "../platform/electron";
+import { getElectronRemote, type ElectronRemoteLike } from "../platform/electron";
 import { AUDIO_EXTS } from "../transcribe/audioFormats";
 
-/* eslint-disable @typescript-eslint/no-explicit-any -- Electron の remote.dialog は型情報が乏しく any 経由で扱う */
 
 interface Choice {
   label: string;
@@ -53,7 +52,7 @@ export class TranscribePicker extends FuzzySuggestModal<Choice> {
   }
 
   private async browse(): Promise<void> {
-    const remote = getElectronRemote() as any;
+    const remote = getElectronRemote() as ElectronRemoteLike | null;
     const dialog = remote?.dialog;
     if (!dialog) {
       new Notice("ファイル選択ダイアログを開けません（この環境では未対応）。");

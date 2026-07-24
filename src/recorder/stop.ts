@@ -23,8 +23,9 @@ function parseDurationSec(statusPath: string): number | undefined {
     const lines = fs.readFileSync(statusPath, "utf8").trim().split(/\r?\n/).reverse();
     for (const line of lines) {
       if (line.includes('"event":"stopped"')) {
-        const obj = JSON.parse(line);
-        if (typeof obj.durationSec === "number") return obj.durationSec;
+        const obj: unknown = JSON.parse(line);
+        const dur = (obj as { durationSec?: unknown } | null)?.durationSec;
+        if (typeof dur === "number") return dur;
       }
     }
   } catch {
