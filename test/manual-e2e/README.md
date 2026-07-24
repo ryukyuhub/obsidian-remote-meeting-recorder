@@ -42,3 +42,15 @@
 - 共通: 実音声の再生ができること（音楽/動画）。マイクが接続されていること。
 
 各項目の対象OSは、ファイル単位（02=Mac、03=Windows）または項目末尾のタグ（`[mac]` / `[win]`、無印=両OS）で判別する。
+
+## CDP による自動駆動（Claude が録音テストを自走できる・2026-07-25 実証済み）
+
+耳での確認が不要な録音フロー系の項目は、Obsidian を `--remote-debugging-port=9222` 付きで起動すれば **Claude Code が CDP 経由で自走できる**（`dev/cdp-eval.mjs`）。実証済みの一連の流れ:
+
+1. `Obsidian.exe --remote-debugging-port=9222 "obsidian://open?vault=<vault>"` で起動（テスト時のみ。終了後は通常起動に戻す）
+2. `open-recording-view` コマンドで録音ビューを開く（`start-recording` コマンドは**ビューを開くだけ**で録音は始まらない）
+3. ビューの `vSource` 等の値を渡して `plugin.startRecordingFromView({...})` を直接呼ぶと録音開始
+4. テスト音源は PowerShell（`System.Windows.Media.MediaPlayer`）で既存 m4a を再生してループバックに流す
+5. `stop-recording` コマンドで停止 → ffmpeg（`~/.meeting-recorder/bin/ffmpeg.exe`）でチャンネル・レベル検証、sessions 後始末・ノート埋め込み・文字起こし挿入をファイルで確認
+
+代替手段: 公式 Obsidian CLI（1.12.7+、設定で有効化）は `obsidian command --id=<pluginId>:<commandId>` でプラグインコマンドを外部実行できるが、JS 評価（内部状態の検証）は CDP のみ可能。
