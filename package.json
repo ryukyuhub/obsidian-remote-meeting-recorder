@@ -1,6 +1,6 @@
 {
   "name": "remote-meeting-recorder",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "description": "Record macOS system audio and your microphone together for meetings, with crash-safe sessions and a local transcript, linked into your Obsidian notes.",
   "main": "main.js",
   "scripts": {
