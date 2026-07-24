@@ -65,7 +65,7 @@ final class Emitter {
 /// **CLI 契約を壊す変更を入れたらここを上げる**（新引数の追加だけなら据え置きでよい）。
 /// abi 2 = タップ方式のシステム音取り込み＋control/level ファイル＋normalize サブコマンド。
 let sysrecAbi = 2
-let sysrecVersion = "0.7.1"
+let sysrecVersion = "0.8.0"
 
 
 func logErr(_ s: String) { FileHandle.standardError.write(Data((s + "\n").utf8)) }
