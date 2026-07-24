@@ -69,6 +69,8 @@ export function spawnCaffeinate(pid: number): void {
       detached: true,
       stdio: "ignore",
     });
+    // ENOENT 等は同期 throw ではなく "error" イベントで届く——未捕捉だとプロセス全体が落ちる
+    child.on("error", () => {});
     child.unref();
   } catch {
     // caffeinate が無くても録音自体は継続する（バイナリ内でも抑止している）

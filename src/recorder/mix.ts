@@ -10,7 +10,17 @@ import { existsWithSize, intermediatePaths, safeUnlink, statBytes } from "../uti
 const NORMALIZE_UNCHANGED = 3;
 
 /**
- * オフライン mix。`caffeinate -i` で包んで実行し、終了コード + 出力ファイルで成否判定。
+ * macOS では `caffeinate -i` で包んでスリープ抑止しつつ実行。
+ * それ以外の環境（fake-binary E2E を走らせる Linux/WSL 等）は caffeinate が無いため直接実行する。
+ */
+function spawnWithSleepGuard(bin: string, args: string[]) {
+  return process.platform === "darwin"
+    ? spawn("caffeinate", ["-i", bin, ...args], { stdio: "ignore" })
+    : spawn(bin, args, { stdio: "ignore" });
+}
+
+/**
+ * オフライン mix。スリープ抑止付きで実行し、終了コード + 出力ファイルで成否判定。
  * `mixed` イベントは status-file に出ない癖があるため、イベントはパースしない（設計書 §4.3）。
  */
 export function runMix(
@@ -25,8 +35,6 @@ export function runMix(
     // 出力チャンネル数（1=モノラル / 2=ステレオ）。会議は L≒R になりがちなので既定はモノラル寄り。
     const channels = ctx.settings.channels === 1 ? "1" : "2";
     const args = [
-      "-i",
-      bin,
       "mix",
       "--in",
       sys,
@@ -49,7 +57,7 @@ export function runMix(
     ];
     let child;
     try {
-      child = spawn("caffeinate", args, { stdio: "ignore" });
+      child = spawnWithSleepGuard(bin, args);
     } catch {
       resolve(false);
       return;
@@ -79,9 +87,7 @@ export function normalizeFile(bin: string, target: string): Promise<boolean> {
     safeUnlink(tmp);
     let child;
     try {
-      child = spawn("caffeinate", ["-i", bin, "normalize", "--in", target, "--out", tmp], {
-        stdio: "ignore",
-      });
+      child = spawnWithSleepGuard(bin, ["normalize", "--in", target, "--out", tmp]);
     } catch {
       resolve(false);
       return;
