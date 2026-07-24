@@ -57,6 +57,14 @@ osascript -e 'set volume output volume 35' >/dev/null
 # 検証済みレベルのトーン（aevalsrc: mean -23dBFS / ffmpeg の sine フィルタは -21dB しか出ないので使わない）
 ffmpeg -v error -f lavfi -i "aevalsrc=0.1414*sin(2*PI*440*t):d=8:s=48000" -ac 2 -c:a pcm_s16le "$WORK/tone.wav" -y
 
+# mic 系ケースは内蔵マイクに固定する。BT イヤホン接続中は既定入力がイヤホン側マイクへ
+# 移り、スピーカーのトーンを拾えず環境依存で落ちるため（テストの対象は DSP であって
+# OS のデバイス選択ではない）。sysrec は録音中だけ既定入力を切替えて復元する（Issue #1）。
+MIC_UID=""
+if "$BIN" list-devices 2>/dev/null | grep -q "BuiltInMicrophoneDevice"; then
+  MIC_UID="BuiltInMicrophoneDevice"
+fi
+
 mean_of() { # $1=file [$2=ss $3=t] → mean dBFS（数値のみ）
   # macOS 同梱 bash 3.2 は set -u で空配列の展開がエラーになるため ${arr[@]+...} で守る
   local args=()
@@ -78,6 +86,7 @@ run_case() {
               --agc "$agc" --status-file "$base.status" --pidfile "$base.pid"
               --mic-gate -34 --sys-gate -48)
   [ "$manual" = on ] && args+=(--manual on --system-gain "$sg" --mic-gain "$mg")
+  [ "$source" != system ] && [ -n "$MIC_UID" ] && args+=(--mic-device "$MIC_UID")
   : > "$base.status"
   "$BIN" "${args[@]}" 1>/dev/null 2>"$base.log" &
   local pid=$!

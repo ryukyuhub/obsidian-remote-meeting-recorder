@@ -11,7 +11,8 @@ OUT="${1:-sysrec}"
 
 echo "[sysrec] compiling -> $OUT"
 # -swift-version 5: CLI 用途のため厳格な並行性チェックを緩める
-swiftc -O -swift-version 5 -parse-as-library sysrec.swift -o "$OUT" \
+# ソースは分割済み（sysrec.swift = 契約/キャプチャ/統括、DspKit = レベル処理、DeviceKit = デバイス）
+swiftc -O -swift-version 5 -parse-as-library sysrec.swift DspKit.swift DeviceKit.swift -o "$OUT" \
   -framework AVFoundation \
   -framework CoreMedia \
   -framework CoreAudio \

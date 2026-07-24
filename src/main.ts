@@ -27,11 +27,9 @@ import { linkToDailyNote } from "./ui/dailyNote";
 import { rotateLogs } from "./state/sessionStore";
 import { ControlWindowManager } from "./ui/controlWindow";
 import { runTranscription } from "./transcribe/runTranscription";
-import { runTranscribeJob } from "./transcribe/job";
-import { findExistingTranscript, findEmbedLine } from "./transcribe/insertTranscript";
+import { transcribeFile, transcribeAudioFile, transcribeEmbed } from "./transcribe/orchestrate";
 import { isAudioFile } from "./transcribe/audioFormats";
 import { TranscribePicker } from "./ui/TranscribePicker";
-import { TranscribeOptionsModal } from "./ui/TranscribeOptionsModal";
 
 // Notice 表示時間（ms）。長め＝内容を読ませたい警告 / エラー＝失敗通知。
 const NOTICE_LONG_MS = 10000;
@@ -305,7 +303,6 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
   // 開始・停止（オーケストレーション）
   // ================================================================
   async startRecordingFromView(input: StartFromViewInput): Promise<void> {
-    const ctx = this.buildContext();
     const saveDir = this.resolveSaveDir(input.saveDirDisplay);
     const opts: StartOptions = {
       source: input.source,
@@ -534,95 +531,27 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
     return this.backend.listMicDevices();
   }
 
-  /** 既存の録音ファイルを手動で文字起こし（オプション選択 → 既存フォールバックへ挿入）。 */
+  // ================================================================
+  // 文字起こし（実体は transcribe/orchestrate.ts・ここは UI からの入口の委譲のみ）
+  // ================================================================
+  /** 既存の録音ファイルを手動で文字起こし。 */
   async transcribeFile(audioPath: string): Promise<void> {
-    const audioRel = computeVaultRelative(this.app, audioPath);
-    await this.openTranscribeOptions({ audioPath, audioRel, note: null });
+    await transcribeFile(this, audioPath);
   }
 
-  /** ファイルエクスプローラの音声ファイルを文字起こし（ノート文脈なし → フォールバック）。 */
+  /** ファイルエクスプローラの音声ファイルを文字起こし。 */
   async transcribeAudioFile(file: TFile): Promise<void> {
-    const base = getVaultBasePath(this.app);
-    if (!base) {
-      new Notice("Vault パスを取得できません。");
-      return;
-    }
-    await this.openTranscribeOptions({
-      audioPath: path.join(base, file.path),
-      audioRel: file.path,
-      note: null,
-    });
+    await transcribeAudioFile(this, file);
   }
 
-  /** 埋め込み音声の文字起こし（結果は埋め込み直下へ挿入・重複は検出して選択）。 */
+  /** 埋め込み音声の文字起こし（結果は埋め込み直下へ挿入）。 */
   async transcribeEmbed(
     audio: TFile,
     note: TFile | null,
     anchorLine?: number,
     srcHint?: string
   ): Promise<void> {
-    const base = getVaultBasePath(this.app);
-    if (!base) {
-      new Notice("Vault パスを取得できません。");
-      return;
-    }
-    let line = anchorLine;
-    if (line == null && note) line = await this.resolveEmbedLine(note, audio, srcHint);
-    await this.openTranscribeOptions({
-      audioPath: path.join(base, audio.path),
-      audioRel: audio.path,
-      note,
-      anchorLine: line,
-    });
-  }
-
-  /** ノート本文から音声埋め込み行（0 始まり）を探す。見つからなければ undefined。 */
-  private async resolveEmbedLine(
-    note: TFile,
-    audio: TFile,
-    srcHint?: string
-  ): Promise<number | undefined> {
-    let content: string;
-    try {
-      content = await this.app.vault.read(note);
-    } catch {
-      return undefined;
-    }
-    // src（埋め込みに書かれたリンクテキスト）優先、無ければ Vault 相対パスで照合
-    return findEmbedLine(content.split("\n"), srcHint ?? audio.path, audio.name);
-  }
-
-  /** 文字起こしの実行オプション（毎回モデル/言語/重複時の扱い）を出してから実行する。 */
-  async openTranscribeOptions(ctx: {
-    audioPath: string;
-    audioRel: string | null;
-    note: TFile | null;
-    anchorLine?: number;
-  }): Promise<void> {
-    // 既存トランスクリプトの有無（モーダルで 置換/追記/中止 を出すかの判定）
-    let existing = false;
-    if (ctx.note) {
-      try {
-        const lines = (await this.app.vault.read(ctx.note)).split("\n");
-        const anchor =
-          ctx.anchorLine ?? findEmbedLine(lines, ctx.audioRel, path.basename(ctx.audioPath));
-        existing = findExistingTranscript(lines, anchor) != null;
-      } catch {
-        /* 読めなければ既存なし扱い */
-      }
-    }
-    const audioName = path.basename(ctx.audioPath);
-    new TranscribeOptionsModal(this, audioName, existing, (opts) => {
-      void runTranscribeJob(this, {
-        audioPath: ctx.audioPath,
-        audioRel: ctx.audioRel,
-        note: ctx.note,
-        anchorLine: ctx.anchorLine,
-        model: opts.model,
-        language: opts.language,
-        dupMode: opts.dupMode,
-      });
-    }).open();
+    await transcribeEmbed(this, audio, note, anchorLine, srcHint);
   }
 
   // ================================================================
