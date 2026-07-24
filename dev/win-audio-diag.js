@@ -1,7 +1,36 @@
-/* Windows 切り分け用: Obsidian の開発者ツール Console にそのまま貼って実行。
-   録音プラグインと同じ手順で「どこで音が消えるか」を段階的に測る。 */
+/* Windows 実機検証（R4）: Obsidian の開発者ツール Console にそのまま貼って実行。
+   録音プラグインと同じ経路で「どこで音が消えるか / レベル補正が効くか」を段階的に測り、
+   最後に 1 行の JSON サマリを出す。★その JSON を貼り返してもらえれば解析できる★
+
+   検証すること（リファクタ調査 §4.3 の実機チェックリスト）:
+     [A] 環境: MediaRecorder の mp4/AAC 対応・AudioEncoder・Chromium 版
+     [B] マイク取得とレベル
+     [C] システム音（WASAPI ループバック）取得とレベル（video track 停止前後）
+     [D] 0.7.x の取り込み時正規化が実信号で -16 dBFS 近傍へ収束するか
+     [E] 出力音量を変えたとき: 生レベルは動いても正規化後が安定しているか
+     [F] 既定出力デバイスを切り替えたとき: トラックが生きるか（ended / 無音 / 継続）
+
+   実行時間は約 75 秒。途中で指示（音を鳴らす・音量を変える・デバイスを切替える）が出る。 */
 (async () => {
-  const log = (...a) => console.log("%c[rmr-diag]", "color:#7c6cf0", ...a);
+  const log = (...a) => console.log("%c[rmr-diag]", "color:#7c6cf0;font-weight:bold", ...a);
+  const summary = { ts: new Date().toISOString(), ua: navigator.userAgent.match(/Chrome\/[0-9.]+/)?.[0] };
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const db = (v) => (v > 0 ? (20 * Math.log10(v)).toFixed(1) : "-inf");
+
+  // ---- [A] 環境 --------------------------------------------------------
+  summary.mediaRecorder = {
+    mp4_aac: typeof MediaRecorder !== "undefined" && MediaRecorder.isTypeSupported("audio/mp4;codecs=mp4a.40.2"),
+    mp4: typeof MediaRecorder !== "undefined" && MediaRecorder.isTypeSupported("audio/mp4"),
+    webm_opus: typeof MediaRecorder !== "undefined" && MediaRecorder.isTypeSupported("audio/webm;codecs=opus"),
+  };
+  try {
+    summary.audioEncoder = typeof AudioEncoder !== "undefined"
+      ? { aac: (await AudioEncoder.isConfigSupported({ codec: "mp4a.40.2", sampleRate: 48000, numberOfChannels: 1, bitrate: 96000 })).supported,
+          opus: (await AudioEncoder.isConfigSupported({ codec: "opus", sampleRate: 48000, numberOfChannels: 1, bitrate: 96000 })).supported }
+      : null;
+  } catch { summary.audioEncoder = "error"; }
+  log("[A] 環境:", JSON.stringify(summary.mediaRecorder), JSON.stringify(summary.audioEncoder));
+
   const getRemote = () => {
     const req = window.require;
     try { const e = req("electron"); if (e && e.remote) return e.remote; } catch {}
@@ -10,48 +39,39 @@
   };
 
   const ctx = new AudioContext();
-  log("AudioContext 生成直後:", ctx.state, "/ sampleRate", ctx.sampleRate);
   await ctx.resume().catch(() => {});
-  log("resume 後:", ctx.state);
+  summary.audioContext = { state: ctx.state, sampleRate: ctx.sampleRate };
+  log("AudioContext:", ctx.state, "/", ctx.sampleRate, "Hz");
 
-  const meter = (node) => {
+  const rmsMeter = (node) => {
     const an = ctx.createAnalyser();
-    an.fftSize = 256;
-    const d = new Uint8Array(an.frequencyBinCount);
+    an.fftSize = 2048;
+    const d = new Float32Array(an.fftSize);
     node.connect(an);
     return () => {
-      an.getByteFrequencyData(d);
+      an.getFloatTimeDomainData(d);
       let s = 0;
-      for (const v of d) s += v;
-      return (s / d.length / 255).toFixed(4);
+      for (let i = 0; i < d.length; i++) s += d[i] * d[i];
+      return Math.sqrt(s / d.length);
     };
   };
-  const sample = async (name, read, n = 8) => {
-    const vals = [];
-    for (let i = 0; i < n; i++) {
-      await new Promise((r) => setTimeout(r, 250));
-      vals.push(read());
-    }
-    log(name, "→", vals.join(" "));
-  };
-  const tinfo = (ts) => ts.map((t) => ({ label: t.label, muted: t.muted, enabled: t.enabled, state: t.readyState }));
 
-  // ---- 1) マイク -------------------------------------------------------
+  // ---- [B] マイク ------------------------------------------------------
   try {
     const mic = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-      video: false,
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }, video: false,
     });
-    log("マイク track:", tinfo(mic.getAudioTracks()));
-    const src = ctx.createMediaStreamSource(new MediaStream(mic.getAudioTracks()));
-    log("↓ 何か喋ってください（2秒）");
-    await sample("マイクのレベル", meter(src));
+    const read = rmsMeter(ctx.createMediaStreamSource(new MediaStream(mic.getAudioTracks())));
+    log("[B] ↓ 何か喋ってください（3 秒）");
+    let peak = 0;
+    for (let i = 0; i < 12; i++) { await sleep(250); peak = Math.max(peak, read()); }
+    summary.micPeakDb = db(peak);
+    log("[B] マイク ピーク:", summary.micPeakDb, "dBFS");
     mic.getTracks().forEach((t) => t.stop());
-  } catch (e) {
-    log("マイク取得に失敗:", e.name, e.message);
-  }
+  } catch (e) { summary.micError = `${e.name}: ${e.message}`; log("[B] マイク失敗:", e); }
 
-  // ---- 2) システム音（ループバック） ----------------------------------
+  // ---- [C] システム音（ループバック）取得 ------------------------------
+  let sys = null;
   try {
     const remote = getRemote();
     if (!remote) throw new Error("electron remote が取れません");
@@ -59,32 +79,85 @@
     const dc = remote.desktopCapturer;
     const handler = (_req, cb) => {
       Promise.resolve(dc.getSources({ types: ["screen"] }))
-        .then((s) => cb({ video: s[0], audio: "loopback" }))
-        .catch(() => cb({}));
+        .then((s) => cb({ video: s[0], audio: "loopback" })).catch(() => cb({}));
     };
     try { session.setDisplayMediaRequestHandler(handler, { useSystemPicker: false }); }
     catch { session.setDisplayMediaRequestHandler(handler); }
-
-    const sys = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+    sys = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
     session.setDisplayMediaRequestHandler(null);
-    log("システム音 track:", tinfo(sys.getAudioTracks()));
-
-    const src2 = ctx.createMediaStreamSource(new MediaStream(sys.getAudioTracks()));
-    const read2 = meter(src2);
-    log("↓ 音楽や動画を鳴らしてください（2秒・video track 停止前）");
-    await sample("システム音（video 停止前）", read2);
-
-    sys.getVideoTracks().forEach((t) => t.stop()); // ← プラグインがやっている操作
-    log("video track を停止 → audio track:", tinfo(sys.getAudioTracks()));
-    log("↓ 鳴らしたまま（2秒・video track 停止後）");
-    await sample("システム音（video 停止後）", read2);
-
-    sys.getTracks().forEach((t) => t.stop());
+    sys.getVideoTracks().forEach((t) => t.stop()); // プラグインと同じ（音声のみ残す）
+    const tr = sys.getAudioTracks()[0];
+    summary.loopback = { label: tr?.label, muted: tr?.muted, state: tr?.readyState };
+    tr?.addEventListener("ended", () => { summary.loopbackEnded = true; log("[F] ★ loopback track が ended になりました"); });
+    log("[C] ループバック取得 OK:", JSON.stringify(summary.loopback));
   } catch (e) {
-    log("システム音取得に失敗:", e.name, e.message);
+    summary.loopbackError = `${e.name}: ${e.message}`;
+    log("[C] システム音失敗:", e);
   }
 
-  log("AudioContext 最終状態:", ctx.state);
+  // ---- [D][E][F] 正規化チェーン（プラグイン 0.7.x と同じ定数）を通して観測 ----
+  if (sys) {
+    const src = ctx.createMediaStreamSource(new MediaStream(sys.getAudioTracks()));
+    const agcGain = ctx.createGain();            // AutoGain 相当（この診断では素通し=1.0）
+    const normGain = ctx.createGain();           // 取り込み時正規化
+    const lim = ctx.createDynamicsCompressor();
+    lim.threshold.value = -1; lim.knee.value = 0; lim.ratio.value = 20; lim.attack.value = 0.003; lim.release.value = 0.1;
+    const readIn = rmsMeter(src);                // 生（ループバック直後）
+    src.connect(agcGain); agcGain.connect(normGain); normGain.connect(lim);
+    const readOut = rmsMeter(lim);               // 正規化＋リミッター後
+
+    // nextNormalizerState と同じアルゴリズム（src/recorder/agc.ts）
+    const T = 0.158, G = 0.0079, MIN = 0.125, MAX = 8.0, WARM = 1.5, TAU = 1.0, FB = 10, SIL = 0.0002;
+    let st = { gain: 1, ge: 0, gs: 0, ae: 0, as: 0 };
+    const step = (rms, dt) => {
+      const n = { gain: st.gain, ge: st.ge, gs: st.gs, ae: st.ae + rms * rms * dt, as: st.as + dt };
+      if (rms > G) { n.ge += rms * rms * dt; n.gs += dt; }
+      let m;
+      if (n.gs >= WARM) m = Math.sqrt(n.ge / n.gs);
+      else if (n.as >= FB) { m = Math.sqrt(n.ae / n.as); if (m < SIL) { st = n; return; } }
+      else { st = n; return; }
+      const d = Math.min(Math.max(T / m, MIN), MAX);
+      n.gain = st.gain + (d - st.gain) * (1 - Math.exp(-dt / TAU));
+      st = n;
+    };
+
+    log("[D] ↓ 音楽/動画を通常音量で鳴らし続けてください（20 秒・正規化の収束を測ります）");
+    const timeline = [];
+    for (let i = 0; i < 200; i++) {
+      const rin = readIn(); step(rin, 0.1);
+      normGain.gain.setTargetAtTime(st.gain, ctx.currentTime, 0.05);
+      if (i % 10 === 0) timeline.push({ t: i / 10, in: db(rin), gain: +st.gain.toFixed(2), out: db(readOut()) });
+      await sleep(100);
+    }
+    summary.normalize20s = timeline.slice(-3);
+    log("[D] 20 秒後: 入力", timeline.at(-1).in, "dBFS / ゲイン", timeline.at(-1).gain, "/ 出力", timeline.at(-1).out, "dBFS");
+
+    log("[E] ↓ Windows の音量を半分くらいに下げて、鳴らし続けてください（15 秒）");
+    const volTl = [];
+    for (let i = 0; i < 150; i++) {
+      const rin = readIn(); step(rin, 0.1);
+      normGain.gain.setTargetAtTime(st.gain, ctx.currentTime, 0.05);
+      if (i % 25 === 0) volTl.push({ t: i / 10, in: db(rin), gain: +st.gain.toFixed(2), out: db(readOut()) });
+      await sleep(100);
+    }
+    summary.volumeChange15s = volTl;
+    log("[E] 音量変更中の推移:", JSON.stringify(volTl));
+
+    log("[F] ↓ 既定の出力デバイスを切り替えてください（スピーカー⇔イヤホン等・15 秒。無ければ何もしなくて OK）");
+    const swTl = [];
+    for (let i = 0; i < 150; i++) {
+      const rin = readIn();
+      if (i % 25 === 0) swTl.push({ t: i / 10, in: db(rin), trackState: sys.getAudioTracks()[0]?.readyState });
+      await sleep(100);
+    }
+    summary.deviceSwitch15s = swTl;
+    summary.loopbackEnded = summary.loopbackEnded ?? false;
+    log("[F] 切替中の推移:", JSON.stringify(swTl));
+
+    sys.getTracks().forEach((t) => t.stop());
+  }
+
   await ctx.close();
-  log("完了");
+  log("======== 以下の 1 行をコピーして報告してください ========");
+  console.log(JSON.stringify(summary));
 })();
