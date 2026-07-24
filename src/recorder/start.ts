@@ -126,6 +126,9 @@ export async function startRecording(
  */
 export function resolveOutPath(saveDir: string, filename: string, ext = ".m4a"): string {
   let stem = (filename || "").trim().replace(/\.(m4a|mp4|webm)$/i, "");
+  // パス区切り・Windows 不正文字を除去。`/` を含むタイトルは保存先が別ディレクトリに
+  // ずれて出力に失敗し、録音がサイレント消失していた（E2E UI-03 で検出）。
+  stem = stem.replace(/[\\/:*?"<>|]/g, "-").replace(/[. ]+$/, "");
   if (!stem) stem = defaultFilename();
 
   let candidate = path.join(saveDir, `${stem}${ext}`);

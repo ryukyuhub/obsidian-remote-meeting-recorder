@@ -299,10 +299,17 @@ export class WebRecorder {
     this.sysChain = connectSource(this.systemStream, this.initSysGainDb);
     this.micChain = connectSource(this.micStream, this.initMicGainDb);
 
-    // 逐次追記の出力先。
+    // 逐次追記の出力先。開けないまま録音を続けると「録れたつもりでゼロバイト」の
+    // サイレント消失になるため、open を確認してから先へ進む（起動検証・設計書 §5.2 の思想）。
     this.fileStream = fs.createWriteStream(this.out);
     this.fileStream.on("error", (e) => {
       this.writeError = e;
+    });
+    await new Promise<void>((resolve, reject) => {
+      this.fileStream!.once("open", () => resolve());
+      this.fileStream!.once("error", (e) =>
+        reject(new Error(`出力ファイルを作成できません: ${e.message}`))
+      );
     });
 
     // MediaRecorder。timeslice ごとに ondataavailable → ディスクへ順序保証で追記。
