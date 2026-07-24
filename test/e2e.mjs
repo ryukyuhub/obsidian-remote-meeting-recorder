@@ -358,6 +358,46 @@ async function testNormalizeFailKeepsRecording() {
 }
 
 // ====================================================================
+// DSP 契約テスト: レベル処理の定数は Swift（sysrec 本体）と TypeScript（Windows 経路
+// agc.ts）に二重実装されており、片側だけ変わる事故が実際に起きた。実バイナリの
+// `dsp-spec` 出力と TS 定数を突き合わせ、両者の一致を機械的に保証する。
+// 実バイナリが無い環境（CI の Linux 等）ではスキップする（fake では契約検証にならない）。
+async function testDspContract() {
+  console.log("\n[14] DSP 契約: sysrec dsp-spec と agc.ts の定数が一致");
+  const bin = path.join(process.cwd(), "native", "sysrec", "sysrec");
+  if (!exists(bin)) {
+    console.log("  - スキップ: 実バイナリなし（npm run build-sysrec 後に検証されます）");
+    return;
+  }
+  let spec;
+  try {
+    const { execFileSync } = await import("node:child_process");
+    spec = JSON.parse(execFileSync(bin, ["dsp-spec"], { encoding: "utf8", timeout: 5000 }));
+  } catch {
+    ok(false, "実バイナリが dsp-spec に応答する（古いバイナリの可能性）");
+    return;
+  }
+  // Float32 経由の丸めがあるため相対誤差 1e-4 で比較する。
+  const near = (a, b) => Math.abs(a - b) <= Math.abs(b) * 1e-4;
+  const pairs = [
+    ["agc.targetRms", spec.agc?.targetRms, api.AGC_TARGET_RMS],
+    ["agc.gateRms", spec.agc?.gateRms, api.AGC_GATE_RMS],
+    ["agc.minGain", spec.agc?.minGain, api.AGC_MIN_GAIN],
+    ["agc.maxGain", spec.agc?.maxGain, api.AGC_MAX_GAIN],
+    ["norm.targetRms", spec.norm?.targetRms, api.NORM_TARGET_RMS],
+    ["norm.gateRms", spec.norm?.gateRms, api.NORM_GATE_RMS],
+    ["norm.minGain", spec.norm?.minGain, api.NORM_MIN_GAIN],
+    ["norm.maxGain", spec.norm?.maxGain, api.NORM_MAX_GAIN],
+  ];
+  for (const [name, swiftVal, tsVal] of pairs) {
+    ok(
+      typeof swiftVal === "number" && near(swiftVal, tsVal),
+      `${name}: Swift=${swiftVal} ≒ TS=${tsVal}`
+    );
+  }
+}
+
+// ====================================================================
 // Windows の仕上げ正規化（取り込み時）。macOS の `sysrec normalize` に相当する段で、
 // 狙いは「録音レベルを OS の出力音量から独立させる」こと。Windows 実機が無いので、
 // 中核の純関数を数値で検証する。
@@ -483,6 +523,7 @@ function testWebAgcCore() {
 try {
   testWebAgcCore();
   testWebNormalizerCore();
+  await testDspContract();
   await testSingle();
   await testBothMixOk();
   await testMixFailThenRemix();
