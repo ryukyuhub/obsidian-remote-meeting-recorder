@@ -16,7 +16,7 @@ Win32Backend（`getDisplayMedia` loopback + `getUserMedia` + MediaRecorder）の
 
 - [ ] **WIN-03 取り込み時正規化の収束**
   - 手順: AGC オンで both 録音。小さめの音源と大声を混ぜる → 停止。
-  - 期待: 仕上がりが -16dBFS 近傍（合格ライン -18〜-14dBFS、耳で「小さすぎ/割れ」がない）。
+  - 期待: 仕上がりが -14dBFS 近傍（合格ライン -16〜-12dBFS、耳で「小さすぎ/割れ」がない）。
 
 - [ ] **WIN-04 出力音量からの独立**
   - 手順: 録音中に Windows の出力音量を半分に下げる。音源は同じ音量で再生し続ける。

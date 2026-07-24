@@ -5,7 +5,7 @@
 # なにを検証するか（fake-binary E2E が見ていない層）:
 #   1. 実バイナリ sysrec で AutoGain × 手動ミキサー × source の 9 通りを実録音し、
 #      プラグインと同じ仕上げ（single→normalize / both→mix）を通した最終ファイルが
-#      目標ラウドネス（-16 dBFS 近傍）に収まること。
+#      目標ラウドネス（-14 dBFS 近傍）に収まること。
 #   2. 録音中に既定出力デバイスを切り替えても、システム音の取り込みが追従して
 #      続くこと（2026-07-24 の実障害の回帰テスト）。
 #
@@ -117,17 +117,17 @@ run_case() {
 }
 
 echo
-echo "[1] レベルマトリクス（目標 -16 dBFS 近傍・トーン再生 6 秒録音 × 9）"
+echo "[1] レベルマトリクス（目標 -14 dBFS 近傍・トーン再生 6 秒録音 × 9）"
 #         label               source  agc manual sg mg   min    max
-run_case "sys_agc-on"         system  on  off    0  0   -20    -12
-run_case "sys_agc-off"        system  off off    0  0   -20    -12
-run_case "sys_manual+6dB"     system  off on     6  0   -20    -12
-run_case "mic_agc-on"         mic     on  off    0  0   -22    -10
-run_case "mic_agc-off"        mic     off off    0  0   -22    -10
-run_case "mic_manual+6dB"     mic     off on     0  6   -22    -10
-run_case "both_agc-on"        both    on  off    0  0   -20    -12
-run_case "both_agc-off"       both    off off    0  0   -20    -12
-run_case "both_manual_0dB"    both    off on     0  0   -20    -12
+run_case "sys_agc-on"         system  on  off    0  0   -18    -10
+run_case "sys_agc-off"        system  off off    0  0   -18    -10
+run_case "sys_manual+6dB"     system  off on     6  0   -18    -10
+run_case "mic_agc-on"         mic     on  off    0  0   -20    -8
+run_case "mic_agc-off"        mic     off off    0  0   -20    -8
+run_case "mic_manual+6dB"     mic     off on     0  6   -20    -8
+run_case "both_agc-on"        both    on  off    0  0   -18    -10
+run_case "both_agc-off"       both    off off    0  0   -18    -10
+run_case "both_manual_0dB"    both    off on     0  0   -18    -10
 
 # ---- 2) デバイス切替の追従（2026-07-24 の実障害の回帰）--------------
 echo

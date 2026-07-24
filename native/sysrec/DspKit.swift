@@ -11,7 +11,7 @@ import Foundation
 /// TypeScript 側（src/recorder/agc.ts の NORM_*）と一致していることを
 /// E2E の契約テストが `sysrec dsp-spec` 経由で検証する。値を変えるときは両方直すこと。
 enum NormSpec {
-    static let targetRMS: Float = 0.158   // -16 dBFS
+    static let targetRMS: Float = 0.2     // -14 dBFS（2026-07-25 に -16 から引き上げ・agc.ts と要一致）
     static let gateRMS: Float = 0.0079    // -42 dBFS（測定ゲート）
     static let minGain: Float = 0.125     // -18 dB
     static let maxGain: Float = 8.0       // +18 dB

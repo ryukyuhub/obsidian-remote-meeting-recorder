@@ -415,12 +415,12 @@ function testWebNormalizerCore() {
   const warm = feed(0.05, api.NORM_WARMUP_SEC - 0.3);
   ok(warm.gain === 1, `有音 ${api.NORM_WARMUP_SEC}s 未満ではゲイン 1.0 のまま（実際: ${warm.gain}）`);
 
-  // 2) 十分流せば目標 -16 dBFS へ収束する。
+  // 2) 十分流せば目標 -14 dBFS へ収束する。
   const conv = feed(0.05, 40);
   const want = api.NORM_TARGET_RMS / 0.05;
   ok(
     Math.abs(conv.gain - want) / want < 0.02,
-    `目標 -16 dBFS へ収束（狙い ${want.toFixed(2)} / 実際 ${conv.gain.toFixed(2)}）`
+    `目標 -14 dBFS へ収束（狙い ${want.toFixed(2)} / 実際 ${conv.gain.toFixed(2)}）`
   );
 
   // 3) **これが本題**: 出力音量で入力が半分になっても、最終的な出力レベルは同じになる。
@@ -441,10 +441,12 @@ function testWebNormalizerCore() {
     `小さい入力は +18 dB でクランプ（実際: ${tiny.gain.toFixed(2)}）`
   );
   // 過大入力は下げる（RMS は 1.0 が上限なので下限クランプ -18dB には実際には届かない）。
+  // 期待値は定数から導出する（目標値を変えたときにテストが黙って古い前提に留まらないように）。
   const huge = feed(0.9, 60);
+  const hugeWant = api.NORM_TARGET_RMS / 0.9;
   ok(
-    huge.gain < 0.2 && huge.gain >= api.NORM_MIN_GAIN,
-    `過大入力は下げる・下限を割らない（実際: ${huge.gain.toFixed(3)}）`
+    Math.abs(huge.gain - hugeWant) / hugeWant < 0.05 && huge.gain >= api.NORM_MIN_GAIN,
+    `過大入力は下げる・下限を割らない（狙い ${hugeWant.toFixed(3)} / 実際 ${huge.gain.toFixed(3)}）`
   );
 
   // 5) 出力音量を絞りすぎて素材全体がゲート(-42 dBFS)未満でも救済する（macOS と同じ）。

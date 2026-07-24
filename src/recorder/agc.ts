@@ -69,8 +69,13 @@ export function nextAgcState(rms: number, prev: AgcState, dtSec: number): AgcSta
 //   - こちらは「録音全体の音量」を目標へ寄せる。累積平均なので時間とともに動かなくなる。
 // AutoGain のオン/オフに関わらず常時掛ける（macOS の normalize が常時なのと同じ）。
 
-/** 目標 RMS = -16 dBFS（macOS の loudnessGain と同じ）。 */
-export const NORM_TARGET_RMS = 0.158;
+/**
+ * 目標 RMS = -14 dBFS（macOS の loudnessGain と同じ）。
+ * 当初 -16 dBFS だったが、実会議録音の聴感が配信基準（YouTube/Spotify ≒ -14 LUFS）より
+ * 小さいというフィードバックで +2 dB 引き上げた（2026-07-25・実測 -16.9 LUFS → 目標 -14）。
+ * ピークは後段の -1 dBFS リミッターが抑えるため余裕は十分。
+ */
+export const NORM_TARGET_RMS = 0.2;
 /** 測定ゲート = -42 dBFS。これ未満の窓は「無音／ノイズ床」として測定に含めない。 */
 export const NORM_GATE_RMS = 0.0079;
 /** ゲインのクランプ = ±18 dB（macOS と同じ）。 */

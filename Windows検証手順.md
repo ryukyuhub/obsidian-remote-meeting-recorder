@@ -31,13 +31,13 @@ Windows 側は実装・修正（0.6.0 の無音対策 / 0.7.0 の取り込み時
 | `[A] mediaRecorder.mp4_aac` | Windows で .m4a 保存できるか（false でも .webm フォールバックで動作はする） |
 | `[B] micPeakDb` | マイク取得と AGC 入力の健全性 |
 | `[C] loopback` | WASAPI ループバック取得（0.6.0 の無音対策の効果） |
-| `[D] normalize20s` | **0.7.0 の取り込み時正規化が実信号で -16 dBFS 近傍へ収束するか**（out が -18〜-14 なら合格） |
+| `[D] normalize20s` | **0.7.0 の取り込み時正規化が実信号で -14 dBFS 近傍へ収束するか**（out が -16〜-12 なら合格） |
 | `[E] volumeChange15s` | 出力音量を下げても out が安定しているか（in は下がって良い・**out が追従して下がるなら問題**） |
 | `[F] deviceSwitch15s` / `loopbackEnded` | 出力デバイス切替でループバックが生きるか（ended=fail-safe 発動 / in が -inf のままなら「黙って無音」＝macOS R0 と同種の対処が必要） |
 
 ## 判定の目安
 
-- **[D] の out が -18〜-14 dBFS** → 取り込み時正規化は機能。合格。
+- **[D] の out が -16〜-12 dBFS** → 取り込み時正規化は機能。合格。
 - **[E] で in が下がり gain が上がって out がほぼ一定** → 「録音レベルを出力音量から独立させる」目的を達成。
 - **[F] で trackState が "ended"** → 現行の fail-safe（自動 finalize）が働く。録音は途切れるが無音記録は残らない＝許容。
   **in が -inf のまま ended にもならない** → Windows にも追従処理が必要（新 issue として起票）。
