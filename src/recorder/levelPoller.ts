@@ -6,7 +6,7 @@ import * as fs from "fs";
  * 別タイマーにする。ミニ窓のレベル送出（60ms）と同じ軽量ポーリング。
  */
 export class LevelPoller {
-  private timer: ReturnType<typeof setInterval> | null = null;
+  private timer: number | null = null;
   private system = 0;
   private mic = 0;
 
@@ -17,12 +17,12 @@ export class LevelPoller {
 
   start(): void {
     if (this.timer) return;
-    this.timer = setInterval(() => this.read(), this.intervalMs);
+    this.timer = window.setInterval(() => this.read(), this.intervalMs);
   }
 
   stop(): void {
     if (this.timer) {
-      clearInterval(this.timer);
+      window.clearInterval(this.timer);
       this.timer = null;
     }
     this.system = 0;
