@@ -16,23 +16,15 @@ import { DoctorModal } from "./ui/DoctorModal";
 import { StatusBarController } from "./ui/statusBar";
 import { RecordingView, RECORDING_VIEW_TYPE } from "./ui/RecordingView";
 import type { RecorderSource, SessionMeta, StartOptions, TerminalEvent } from "./types";
-import { startRecording, StartError, type StartResult } from "./recorder/start";
-import { startWebRecording } from "./recorder/startWeb";
-import type { WebRecorder } from "./recorder/webCapture";
-import { stopRecording } from "./recorder/stop";
-import { stopWebRecording } from "./recorder/stopWeb";
+import { StartError, type StartResult } from "./recorder/start";
+import { createRecorderBackend, type RecorderBackend } from "./recorder/backend";
 import { remix } from "./recorder/mix";
 import { restoreInProgressSessions } from "./recorder/restore";
 import { SessionWatcher } from "./recorder/watch";
 import { insertEmbed, computeVaultRelative } from "./ui/embed";
-import { listMicDevices, type MicDevice } from "./recorder/devices";
-import { listWebMicDevices } from "./audio/webDevices";
+import type { MicDevice } from "./recorder/devices";
 import { linkToDailyNote } from "./ui/dailyNote";
-import { rotateLogs, readSessionMeta } from "./state/sessionStore";
-import { sessionPaths } from "./state/paths";
-import { LevelPoller } from "./recorder/levelPoller";
-import { atomicWriteFile } from "./util/fsx";
-import { WebAudioTap } from "./audio/webAudioTap";
+import { rotateLogs } from "./state/sessionStore";
 import { ControlWindowManager } from "./ui/controlWindow";
 import { runTranscription } from "./transcribe/runTranscription";
 import { runTranscribeJob } from "./transcribe/job";
@@ -43,8 +35,6 @@ import { TranscribeOptionsModal } from "./ui/TranscribeOptionsModal";
 
 // Notice 表示時間（ms）。長め＝内容を読ませたい警告 / エラー＝失敗通知。
 const NOTICE_LONG_MS = 10000;
-/** macOS 無音ウォッチ: 開始からこの時間レベル 0 のままなら警告（BT 立ち上がり猶予込み）。 */
-const SILENCE_WATCH_MS = 10000;
 const NOTICE_ERROR_MS = 8000;
 
 /** ビューが操作する前面録音の情報（primary）。 */
@@ -98,24 +88,26 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
   activeRecording: ActiveRecordingInfo | null = null;
 
   private watchers = new Map<string, SessionWatcher>();
-  // Windows(win32) のレンダラ内録音インスタンス（sessionId → WebRecorder）。真実の源はメモリ側。
-  private webRecorders = new Map<string, WebRecorder>();
   private embedTargets = new Map<string, TFile | null>();
   private handledTerminals = new Set<string>();
   private recordingView: RecordingView | null = null;
   private lastWarningSessionId: string | null = null;
   private finalizedCallbacks: Array<(ev: TerminalEvent) => void> = [];
 
-  // マイクの表示専用タップ（録音ビュー・ミニ窓の両方が参照する一元所有・§3.4）
-  private micTap: WebAudioTap | null = null;
+  // 録音バックエンド（macOS=sysrec / Windows=WebRecorder）。platform 分岐はここに集約（§R3）。
+  private backend!: RecorderBackend;
   private controlWindow: ControlWindowManager | null = null;
-  // 手動ミキサー: sysrec の level ファイルを読むポーラーと、現在のソース別ゲイン(dB)。
-  private levelPoller: LevelPoller | null = null;
-  private silenceWatchTimer: number | null = null;
+  // 手動ミキサー: 現在のソース別ゲイン(dB)。適用はバックエンドに委譲。
   private mixerGain = { systemDb: 0, micDb: 0 };
 
   async onload(): Promise<void> {
     await this.loadSettings();
+
+    this.backend = createRecorderBackend({
+      getCtx: () => this.buildContext(),
+      notify: (message) => new Notice(message, NOTICE_LONG_MS),
+      onTerminal: (ev, id) => this.handleTerminal(ev, id),
+    });
 
     this.registerView(RECORDING_VIEW_TYPE, (leaf) => new RecordingView(leaf, this));
     this.addSettingTab(new RMRSettingTab(this.app, this));
@@ -246,22 +238,11 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
     // macOS: 録音は殺さない。watcher の interval を止めるだけ（設計書 §6-7）。
     for (const w of this.watchers.values()) w.stop();
     this.watchers.clear();
-    // Windows: レンダラ内録音はプラグイン unload で生かし続けられない。graceful に停止して
-    // ファイルを確定する（best-effort。逐次追記済みなので最悪でも直近まで残る）。
-    for (const rec of this.webRecorders.values()) {
-      try {
-        void rec.stop();
-      } catch {
-        /* noop */
-      }
-    }
-    this.webRecorders.clear();
+    // バックエンドの後始末（macOS=表示系のみ / Windows=graceful 停止でファイル確定）。
+    this.backend.dispose();
     // ミニ窓は残すとゾンビ化するので確実に破棄（表示専用・録音には非影響）
     this.controlWindow?.destroy();
     this.controlWindow = null;
-    this.stopMicTap();
-    this.stopLevelPoller();
-    this.stopSilenceWatch();
   }
 
   // ================================================================
@@ -348,24 +329,7 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
 
     let result;
     try {
-      if (process.platform === "win32") {
-        // Windows: 外部バイナリを使わずレンダラ内 Web Audio で録音する（Windows対応 実装計画）。
-        const r = await startWebRecording(
-          ctx,
-          opts,
-          (id) => this.onWebTerminated(id),
-          () =>
-            new Notice(
-              "録音レベルが 0 のままです。音声が取り込めていない可能性があります" +
-                "（システム音声の共有・マイクの許可・入力デバイスを確認してください）。",
-              NOTICE_LONG_MS
-            )
-        );
-        this.webRecorders.set(r.sessionId, r.recorder);
-        result = r;
-      } else {
-        result = await startRecording(ctx, opts);
-      }
+      result = await this.backend.start(opts);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       const tail = e instanceof StartError && e.logTail ? `\n---\n${e.logTail}` : "";
@@ -388,147 +352,46 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
     const meta = result.meta; // 永続化された正の meta（startedAt 一貫）
     this.activeRecording = toActiveRecordingInfo(meta);
     this.startWatcher(meta);
-    // Windows は WebRecorder 自身がマイクを取得済みで表示用レベルも出せるため、別タップを開かない
-    // （同一マイクの二重 getUserMedia を避ける）。macOS は従来どおり表示専用タップを使う。
-    if (meta.source !== "system" && process.platform !== "win32") {
-      this.startMicTap(opts.micDevice, monitor);
-    }
-    // 手動ミキサー: 初期ゲインを控え、sysrec の level ファイルのポーリングを開始（macOS）。
+    // 手動ミキサー: 初期ゲインを控える。適用・メーター・無音ウォッチはバックエンドが担う。
     this.mixerGain = { systemDb: opts.systemGainDb ?? 0, micDb: opts.micGainDb ?? 0 };
-    if (process.platform !== "win32") {
-      const level = sessionPaths(this.buildContext().paths, meta.id).level;
-      this.levelPoller = new LevelPoller(level);
-      this.levelPoller.start();
-      this.startSilenceWatch(meta);
-    }
+    this.backend.attachSession(meta, { micDevice: opts.micDevice, monitor });
     this.maybeOpenControlWindow();
-  }
-
-  /**
-   * macOS の無音ウォッチ（Windows は WebRecorder 内に同等の 5 秒ウォッチあり）。
-   * 開始から 10 秒、録音対象ソースのレベルが 0 のままなら Notice で知らせる。
-   * BT イヤホンの死に状態などで「録れているつもりが無音」だった実害（2026-07-24）への防御。
-   * レベルは sysrec が書く level ファイル（取り込み実測 RMS）を LevelPoller 経由で読む。
-   */
-  private startSilenceWatch(meta: SessionMeta): void {
-    this.stopSilenceWatch();
-    const checkSystem = meta.source !== "mic";
-    const checkMic = meta.source !== "system";
-    this.silenceWatchTimer = window.setTimeout(() => {
-      this.silenceWatchTimer = null;
-      if (this.activeRecording?.sessionId !== meta.id) return; // 既に停止/別セッション
-      const lv = this.levelPoller?.levels();
-      if (!lv) return;
-      const dead: string[] = [];
-      if (checkSystem && lv.system <= 0) dead.push("システム音声");
-      if (checkMic && lv.mic <= 0) dead.push("マイク");
-      if (dead.length > 0) {
-        new Notice(
-          `⚠ ${dead.join("と")}のレベルが 0 のままです。音声が取り込めていない可能性があります` +
-            `（出力デバイスの接続状態・マイク権限・入力デバイスを確認してください）。録音自体は継続しています。`,
-          NOTICE_LONG_MS
-        );
-      }
-    }, SILENCE_WATCH_MS);
-  }
-
-  private stopSilenceWatch(): void {
-    if (this.silenceWatchTimer != null) {
-      window.clearTimeout(this.silenceWatchTimer);
-      this.silenceWatchTimer = null;
-    }
-  }
-
-  // ================================================================
-  // マイク表示専用タップ（録音ビュー・ミニ窓が参照）
-  // ================================================================
-  private startMicTap(deviceId: string | undefined, monitor: boolean): void {
-    this.stopMicTap();
-    const tap = new WebAudioTap();
-    this.micTap = tap;
-    void tap.start(deviceId || undefined, monitor).catch((e) => {
-      new Notice(`マイクメーターを開始できませんでした（録音は継続）: ${(e as Error).message}`);
-      if (this.micTap === tap) this.micTap = null;
-    });
-  }
-
-  private stopMicTap(): void {
-    this.micTap?.stop();
-    this.micTap = null;
   }
 
   /** 現在の入力レベル（0..1・表示専用）。録音ビュー/ミニ窓が読む。 */
   getMicLevel(): number {
-    // Windows は録音中の WebRecorder からレベルを読む（マイクを別途開かない）。
-    const id = this.activeRecording?.sessionId;
-    if (id) {
-      const rec = this.webRecorders.get(id);
-      if (rec) return rec.getLevel();
-    }
-    return this.micTap?.getLevel() ?? 0;
+    return this.backend.micLevel(this.activeRecording?.sessionId ?? null);
   }
 
-  /**
-   * 録音中のソース別レベル（0..1）。system/mic の 2 メーター用。
-   * macOS は sysrec の level ファイル（LevelPoller）、Windows は WebRecorder から取得。
-   * （Windows の per-source 分離は後続。現状は system=0 / mic=混合レベルにフォールバック。）
-   */
+  /** 録音中のソース別レベル（0..1）。system/mic の 2 メーター用。 */
   getSourceLevels(): { system: number; mic: number } {
-    const id = this.activeRecording?.sessionId;
-    if (id) {
-      const rec = this.webRecorders.get(id);
-      if (rec) return rec.getSourceLevels(); // Windows: WebRecorder のソース別 Analyser
-    }
-    if (this.levelPoller) return this.levelPoller.levels(); // macOS: sysrec の level ファイル
-    return { system: 0, mic: 0 };
+    return this.backend.sourceLevels(this.activeRecording?.sessionId ?? null);
   }
 
-  /** モニター（試聴）オン/オフをタップに反映。 */
+  /** モニター（試聴）オン/オフを反映。 */
   setMonitor(on: boolean): void {
-    this.micTap?.setMonitor(on);
+    this.backend.setMonitor(on);
   }
 
   /** 手動ミキサー: システム音のゲイン(dB)を録音中にライブ変更する。 */
   setSystemGain(db: number): void {
     this.mixerGain.systemDb = db;
-    this.writeMixerControl();
+    this.applyMixerGains();
   }
 
   /** 手動ミキサー: マイクのゲイン(dB)を録音中にライブ変更する。 */
   setMicGain(db: number): void {
     this.mixerGain.micDb = db;
-    this.writeMixerControl();
+    this.applyMixerGains();
   }
 
   /** 現在のミキサーゲイン(dB)をライブ適用する。 */
-  private writeMixerControl(): void {
-    const id = this.activeRecording?.sessionId;
-    if (!id) return;
-    // Windows: WebRecorder の GainNode に直接反映（sysrec は無い）。
-    const rec = this.webRecorders.get(id);
-    if (rec) {
-      rec.setSystemGain(this.mixerGain.systemDb);
-      rec.setMicGain(this.mixerGain.micDb);
-      return;
-    }
-    // macOS: control ファイルへ書く（sysrec が polling してライブ適用）。
-    try {
-      const control = sessionPaths(this.buildContext().paths, id).control;
-      atomicWriteFile(
-        control,
-        JSON.stringify({
-          systemGainDb: this.mixerGain.systemDb,
-          micGainDb: this.mixerGain.micDb,
-        })
-      );
-    } catch {
-      /* 書けなくても録音は継続 */
-    }
-  }
-
-  private stopLevelPoller(): void {
-    this.levelPoller?.stop();
-    this.levelPoller = null;
+  private applyMixerGains(): void {
+    this.backend.applyGains(
+      this.activeRecording?.sessionId ?? null,
+      this.mixerGain.systemDb,
+      this.mixerGain.micDb
+    );
   }
 
   private startWatcher(meta: SessionMeta): void {
@@ -567,26 +430,8 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
     // watcher を止めてから明示停止（二重 finalize/通知を防ぐ・finalize は冪等）
     this.watchers.get(id)?.stop();
     this.watchers.delete(id);
-    const ctx = this.buildContext();
-    const meta = readSessionMeta(sessionPaths(ctx.paths, id).json);
-    const ev =
-      meta?.platform === "win32"
-        ? await this.stopWebSession(id)
-        : await stopRecording(ctx, id);
+    const ev = await this.backend.stop(id);
     this.handleTerminal(ev, id);
-  }
-
-  /** Windows(win32) セッションの停止。WebRecorder を Map から外し、finalize は stopWeb.ts に委譲。冪等。 */
-  private stopWebSession(id: string): Promise<TerminalEvent> {
-    const rec = this.webRecorders.get(id);
-    this.webRecorders.delete(id);
-    return stopWebRecording(this.buildContext(), id, rec);
-  }
-
-  /** WebRecorder が予期せず終了（トラック切断・録音エラー）したときの合流点。明示停止と冪等。 */
-  private onWebTerminated(id: string): void {
-    if (this.handledTerminals.has(id) || !this.webRecorders.has(id)) return;
-    void this.stopWebSession(id).then((ev) => this.handleTerminal(ev, id));
   }
 
   // ================================================================
@@ -602,9 +447,7 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
     const wasActive = this.activeRecording?.sessionId === sessionId;
     if (wasActive) {
       this.activeRecording = null;
-      this.stopMicTap();
-      this.stopLevelPoller();
-      this.stopSilenceWatch();
+      this.backend.detachSession();
       this.controlWindow?.close();
     }
 
@@ -686,13 +529,9 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
     }
   }
 
-  /**
-   * マイク入力デバイス一覧。
-   * macOS は sysrec `list-devices`、Windows はレンダラの enumerateDevices（Issue #1）。
-   */
+  /** マイク入力デバイス一覧（macOS=sysrec list-devices / Windows=enumerateDevices）。 */
   async listMicDevices(): Promise<MicDevice[]> {
-    if (process.platform === "win32") return listWebMicDevices();
-    return listMicDevices(this.buildContext().resolveBinPath());
+    return this.backend.listMicDevices();
   }
 
   /** 既存の録音ファイルを手動で文字起こし（オプション選択 → 既存フォールバックへ挿入）。 */
@@ -842,20 +681,23 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
       return;
     }
 
+    let primaryMeta: SessionMeta | null = null;
     for (const meta of result.active) {
       if (!this.activeRecording) {
         this.activeRecording = toActiveRecordingInfo(meta);
+        primaryMeta = meta;
       }
       this.startWatcher(meta);
     }
     if (result.active.length > 0) {
       new Notice(`録音中のセッションを ${result.active.length} 件復元しました。`);
     }
-    // primary の表示専用タップ・ミニ窓も復帰（reload をまたいでも操作できるように）
-    if (this.activeRecording) {
-      if (this.activeRecording.source !== "system") {
-        this.startMicTap(this.settings.inputDeviceUid || undefined, this.settings.monitor);
-      }
+    // primary の付帯機能（メーター・ミニ窓）も復帰（reload をまたいでも操作できるように）
+    if (primaryMeta) {
+      this.backend.attachSession(primaryMeta, {
+        micDevice: this.settings.inputDeviceUid || undefined,
+        monitor: this.settings.monitor,
+      });
       this.maybeOpenControlWindow();
     }
 
