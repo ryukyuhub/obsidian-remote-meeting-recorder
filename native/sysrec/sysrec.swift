@@ -291,6 +291,14 @@ final class WriterBox {
 
 enum CaptureError: Error { case msg(String) }
 
+/// 取り込みバッファの実時刻（ホスト時間）。デバイスが時刻を持たない場合は現在時刻で代用する。
+@inline(__always)
+func captureHostTime(_ ts: UnsafePointer<AudioTimeStamp>) -> UInt64 {
+    let t = ts.pointee
+    if t.mFlags.contains(.hostTimeValid), t.mHostTime != 0 { return t.mHostTime }
+    return mach_absolute_time()
+}
+
 /// AVAudioPCMBuffer(Float32) を、指定 PTS 付きの CMSampleBuffer に包む。
 /// WriterBox が期待する「Float32 LPCM の CMSampleBuffer」を作る（AGC 経路も通る）。
 func makeAudioSampleBuffer(from pcm: AVAudioPCMBuffer, pts: CMTime) -> CMSampleBuffer? {
@@ -371,7 +379,7 @@ func copyToPCMBuffer(_ abl: UnsafeMutableAudioBufferListPointer, format: AVAudio
 
 /// システム音声を Core Audio プロセスタップで取得（画面キャプチャなし）。onBuffer に native PCM を渡す。
 final class TapCapturer {
-    private let onBuffer: (AVAudioPCMBuffer) -> Void
+    private let onBuffer: (AVAudioPCMBuffer, UInt64) -> Void
     private var tapID = AudioObjectID(kAudioObjectUnknown)
     private var aggID = AudioObjectID(kAudioObjectUnknown)
     private var ioProc: AudioDeviceIOProcID?
@@ -388,7 +396,7 @@ final class TapCapturer {
         mSelector: kAudioHardwarePropertyDefaultOutputDevice,
         mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
 
-    init(onBuffer: @escaping (AVAudioPCMBuffer) -> Void) { self.onBuffer = onBuffer }
+    init(onBuffer: @escaping (AVAudioPCMBuffer, UInt64) -> Void) { self.onBuffer = onBuffer }
 
     func start() throws {
         let sys = AudioObjectID(kAudioObjectSystemObject)
@@ -467,14 +475,16 @@ final class TapCapturer {
             throw CaptureError.msg("集約デバイスを作成できませんでした。")
         }
 
-        let block: AudioDeviceIOBlock = { [weak self] _, inInputData, _, _, _ in
+        // リアルタイムスレッド。ここでは ABL をコピーして渡すだけに留める
+        // （変換・書き出しまでやると 10.67ms のバッファ周期を超えて IO 周期が落ちる）。
+        let block: AudioDeviceIOBlock = { [weak self] _, inInputData, inInputTime, _, _ in
             guard let self, let fmt = self.srcFormat else { return }
             let abl = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inInputData))
             guard abl.count >= 1, abl[0].mData != nil else { return }
             let ch = max(1, Int(abl[0].mNumberChannels))
             let frames = AVAudioFrameCount(Int(abl[0].mDataByteSize) / (MemoryLayout<Float>.size * ch))
             guard frames > 0, let pcm = copyToPCMBuffer(abl, format: fmt, frames: frames) else { return }
-            self.onBuffer(pcm)
+            self.onBuffer(pcm, captureHostTime(inInputTime))
         }
         guard AudioDeviceCreateIOProcIDWithBlock(&ioProc, aggID, nil, block) == noErr, let proc = ioProc else {
             AudioHardwareDestroyAggregateDevice(aggID); aggID = 0
@@ -580,7 +590,7 @@ final class TapCapturer {
 ///     対象デバイスへ切替え、確実な経路で録って、停止時に必ず戻す。
 final class MicCapturer {
     private let engine = AVAudioEngine()
-    private let onBuffer: (AVAudioPCMBuffer) -> Void
+    private let onBuffer: (AVAudioPCMBuffer, UInt64) -> Void
     private var installed = false
     // 特定デバイス用 IOProc 経路の保持
     private var procDeviceID = AudioObjectID(kAudioObjectUnknown)
@@ -588,7 +598,7 @@ final class MicCapturer {
     private var deviceFormat: AVAudioFormat?
     // 一時的に既定入力を切替えた場合の復元先（nil＝切替えていない）
     private var savedDefaultInput: AudioDeviceID?
-    init(onBuffer: @escaping (AVAudioPCMBuffer) -> Void) { self.onBuffer = onBuffer }
+    init(onBuffer: @escaping (AVAudioPCMBuffer, UInt64) -> Void) { self.onBuffer = onBuffer }
 
     func start(micDevice: String?) throws {
         // 特定マイク指定があり解決できたら、対象を一時的に既定入力へ切替えてから IOProc で取得する。
@@ -632,8 +642,8 @@ final class MicCapturer {
         guard format.channelCount > 0, format.sampleRate > 0 else {
             throw CaptureError.msg("マイク入力フォーマットが不正です（入力デバイスを確認してください）。")
         }
-        input.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buf, _ in
-            self?.onBuffer(buf)
+        input.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buf, when in
+            self?.onBuffer(buf, when.hostTime != 0 ? when.hostTime : mach_absolute_time())
         }
         installed = true
         engine.prepare()
@@ -652,13 +662,13 @@ final class MicCapturer {
         deviceFormat = fmt
         // フレーム数はデバイスの bytesPerFrame から算出（Float32/Int16 等どの LPCM でも正しく数える）。
         let bytesPerFrame = max(1, Int(asbd.mBytesPerFrame))
-        let block: AudioDeviceIOBlock = { [weak self] _, inInputData, _, _, _ in
+        let block: AudioDeviceIOBlock = { [weak self] _, inInputData, inInputTime, _, _ in
             guard let self, let fmt = self.deviceFormat else { return }
             let abl = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inInputData))
             guard abl.count >= 1, abl[0].mData != nil else { return }
             let frames = AVAudioFrameCount(Int(abl[0].mDataByteSize) / bytesPerFrame)
             guard frames > 0, let pcm = copyToPCMBuffer(abl, format: fmt, frames: frames) else { return }
-            self.onBuffer(pcm)
+            self.onBuffer(pcm, captureHostTime(inInputTime))
         }
         var proc: AudioDeviceIOProcID?
         let cst = AudioDeviceCreateIOProcIDWithBlock(&proc, devID, nil, block)
@@ -688,6 +698,140 @@ final class MicCapturer {
     }
 }
 
+/// 1 ソース分の取り込み経路（system / mic それぞれ 1 本）。
+///
+/// **リアルタイムスレッドから重い処理を追い出すのがこのクラスの主目的。**
+/// 以前は IOProc の中で「フォーマット変換 → ゲイン → AGC/リミッター/ゲート →
+/// AVAssetWriter への書き込み」まで同期実行していた。バッファ周期（512 フレーム
+/// = 10.67ms @48kHz）を超えた瞬間に Core Audio はその IO 周期を捨てるため、
+/// 負荷が高いほど取りこぼしが増える。実測では平均 0.08ms でも最大 10.5ms に達しており、
+/// 会議中（Obsidian＋マイク＋同期＋文字起こし）には取得率が 33% まで落ちていた。
+///
+/// さらに以前は時間軸を「書けたフレーム数の累積」で決めていたため、取りこぼしが
+/// 無音の穴にならず後ろが前に詰まり、そのまま再生速度の狂い（早送り）になっていた。
+/// ここでは各バッファの実時刻（ホスト時間）を基準に位置を決め、遅れているぶんは
+/// 無音で埋める。こうすると取りこぼしても「その区間が無音になる」だけで済み、
+/// system と mic の同期も保たれる。
+final class CaptureLane {
+    private let box: WriterBox?
+    private let gain: ManualGain
+    private let sampleRate: Int
+    private let channels: Int
+    private let label: String
+    private let onLevel: (Float) -> Void
+    private let queue: DispatchQueue
+
+    // 以下はすべて queue 上でのみ触る
+    private var norm: FormatNormalizer?
+    private var normSrc: AVAudioFormat?
+    private var frames: Int64 = 0
+    private var baseHost: UInt64 = 0
+    private var paddedFrames: Int64 = 0
+
+    // submit（リアルタイムスレッド）と queue の間で共有
+    private let pendingLock = NSLock()
+    private var pending = 0
+    private var droppedBuffers: Int64 = 0
+    /// 処理が詰まったときに積む上限（約 0.7 秒ぶん）。超過分は捨てて無音で埋める
+    /// ＝メモリを無限に食うより、欠落を無音として正直に残すほうが安全。
+    private static let maxPending = 64
+    /// 実時刻とのズレをこの長さ以上検出したら無音で埋める（通常のジッタでは埋めない）。
+    private static let padThresholdSec = 0.02
+
+    init(box: WriterBox?, gainDb: Double, sampleRate: Int, channels: Int, label: String,
+         onLevel: @escaping (Float) -> Void) {
+        self.box = box
+        self.gain = ManualGain(db: gainDb)
+        self.sampleRate = sampleRate
+        self.channels = channels
+        self.label = label
+        self.onLevel = onLevel
+        self.queue = DispatchQueue(label: "sysrec.lane.\(label)", qos: .userInitiated)
+    }
+
+    func setGainDb(_ db: Double) { gain.setTargetDb(db) }
+
+    /// リアルタイムスレッドから呼ばれる。積むだけで、重い処理はしない。
+    func submit(_ pcm: AVAudioPCMBuffer, hostTime: UInt64) {
+        pendingLock.lock()
+        if pending >= Self.maxPending {
+            droppedBuffers += 1
+            pendingLock.unlock()
+            return
+        }
+        pending += 1
+        pendingLock.unlock()
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.process(pcm, hostTime)
+            self.pendingLock.lock(); self.pending -= 1; self.pendingLock.unlock()
+        }
+    }
+
+    private func process(_ pcm: AVAudioPCMBuffer, _ hostTime: UInt64) {
+        if norm == nil || normSrc != pcm.format {
+            if normSrc != nil && normSrc != pcm.format {
+                logErr("\(label): 取り込みフォーマット変化（\(Int(normSrc?.sampleRate ?? 0))Hz → \(Int(pcm.format.sampleRate))Hz）に追従")
+            }
+            norm = FormatNormalizer(from: pcm.format, sampleRate: Double(sampleRate),
+                                    channels: AVAudioChannelCount(max(1, channels)))
+            normSrc = pcm.format
+        }
+        guard let out = norm?.convert(pcm), out.frameLength > 0 else { return }
+        if baseHost == 0 { baseHost = hostTime }
+
+        // 実時刻に対して書き込みが遅れていれば、そのぶんを無音で埋めてから書く。
+        let elapsed = AVAudioTime.seconds(forHostTime: hostTime &- baseHost)
+        let expected = Int64(elapsed * Double(sampleRate))
+        let gap = expected - frames
+        if gap > Int64(Self.padThresholdSec * Double(sampleRate)) { padSilence(gap) }
+
+        onLevel(applyGainAndLevel(out, gain))
+        appendBuffer(out)
+    }
+
+    /// 取りこぼした区間を無音で埋める（1 秒ずつ）。
+    private func padSilence(_ count: Int64) {
+        guard let fmt = norm?.targetFormat else { return }
+        var remaining = count
+        while remaining > 0 {
+            let n = AVAudioFrameCount(min(Int64(sampleRate), remaining))
+            guard let buf = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: n) else { return }
+            buf.frameLength = n
+            let abl = UnsafeMutableAudioBufferListPointer(buf.mutableAudioBufferList)
+            for b in abl { if let d = b.mData { memset(d, 0, Int(b.mDataByteSize)) } }
+            appendBuffer(buf)
+            paddedFrames += Int64(n)
+            remaining -= Int64(n)
+        }
+    }
+
+    private func appendBuffer(_ buf: AVAudioPCMBuffer) {
+        let pts = CMTime(value: frames, timescale: CMTimeScale(sampleRate))
+        guard let sb = makeAudioSampleBuffer(from: buf, pts: pts) else { return }
+        box?.append(sb)
+        frames += Int64(buf.frameLength)
+    }
+
+    /// 残りを処理しきってから統計を返す（stop 後に呼ぶ）。
+    func drain() -> (frames: Int64, padded: Int64, dropped: Int64) {
+        queue.sync {}
+        pendingLock.lock(); let dropped = droppedBuffers; pendingLock.unlock()
+        return (frames, paddedFrames, dropped)
+    }
+}
+
+/// interleaved Float32 バッファへ手動ゲインをランプ乗算し、適用後 RMS を返す（メーター用）。
+func applyGainAndLevel(_ buf: AVAudioPCMBuffer, _ gain: ManualGain) -> Float {
+    let abl = UnsafeMutableAudioBufferListPointer(buf.mutableAudioBufferList)
+    guard abl.count >= 1, let data = abl[0].mData else { return 0 }
+    let base = data.assumingMemoryBound(to: Float.self)
+    let ch = max(1, Int(abl[0].mNumberChannels))
+    var chans: [UnsafeMutablePointer<Float>] = []
+    for c in 0..<ch { chans.append(base + c) }
+    return gain.process(chans, frames: Int(buf.frameLength), stride: ch)
+}
+
 final class Capture {
     private let opt: Options
     private let emitter: Emitter
@@ -695,24 +839,19 @@ final class Capture {
     private var micBox: WriterBox?
     private var tap: TapCapturer?
     private var mic: MicCapturer?
-    private var sysNorm: FormatNormalizer?
-    private var sysNormSrc: AVAudioFormat?
-    private var micNorm: FormatNormalizer?
-    private var sysFrames: Int64 = 0
-    private var micFrames: Int64 = 0
+    // ソースごとの取り込み経路（変換・書き込みは lane 内の専用キューで行う）。
+    private var sysLane: CaptureLane?
+    private var micLane: CaptureLane?
+    private var sysStats: (frames: Int64, padded: Int64, dropped: Int64) = (0, 0, 0)
+    private var micStats: (frames: Int64, padded: Int64, dropped: Int64) = (0, 0, 0)
     private var stopping = false
     private let stopLock = NSLock()
-    // 手動ミキサー: ソース別ゲイン（control でライブ更新）と、メーター用の平滑化レベル。
-    private let sysGain: ManualGain
-    private let micGain: ManualGain
     private let levelLock = NSLock()
     private var sysLevel: Float = 0
     private var micLevel: Float = 0
 
     init(_ opt: Options, _ emitter: Emitter) {
         self.opt = opt; self.emitter = emitter
-        self.sysGain = ManualGain(db: opt.systemGainDb)
-        self.micGain = ManualGain(db: opt.micGainDb)
         // 出力先パスの用意（both は中間 2 ファイル）
         // AGC 有効時、ソース別にノイズゲート（無音を著しく減衰）を掛ける。閾値・オンオフは設定で可変。
         // マイクは既定オン(-40dBFS)、システム音は既定オフ（相手の声を切らないため）。
@@ -732,14 +871,33 @@ final class Capture {
     }
 
     func start() {
+        // lane は capturer より先に用意する（最初のバッファを取りこぼさないため）。
+        if opt.source != "mic" {
+            sysLane = CaptureLane(box: sysBox, gainDb: opt.systemGainDb, sampleRate: opt.sampleRate,
+                                  channels: opt.channels, label: "システム音") { [weak self] v in
+                self?.storeLevel(v, isSystem: true)
+            }
+        }
+        if opt.source != "system" {
+            micLane = CaptureLane(box: micBox, gainDb: opt.micGainDb, sampleRate: opt.sampleRate,
+                                  channels: opt.channels, label: "マイク") { [weak self] v in
+                self?.storeLevel(v, isSystem: false)
+            }
+        }
         do {
             if opt.source != "mic" {
-                let t = TapCapturer { [weak self] pcm in self?.handleSystem(pcm) }
+                let t = TapCapturer { [weak self] pcm, host in
+                    guard let self, !self.stopping else { return }
+                    self.sysLane?.submit(pcm, hostTime: host)
+                }
                 try t.start()
                 tap = t
             }
             if opt.source != "system" {
-                let m = MicCapturer { [weak self] pcm in self?.handleMic(pcm) }
+                let m = MicCapturer { [weak self] pcm, host in
+                    guard let self, !self.stopping else { return }
+                    self.micLane?.submit(pcm, hostTime: host)
+                }
                 try m.start(micDevice: opt.micDevice)
                 mic = m
             }
@@ -756,54 +914,6 @@ final class Capture {
         ])
     }
 
-    // system: タップ由来の PCM を目標フォーマットへ正規化し、連番 PTS で sysBox へ。
-    // 出力デバイス切替でタップのフォーマットが変わり得る（BT 44.1kHz ⇔ 内蔵 48kHz）ので、
-    // 入力フォーマットの変化を検知したら変換器を作り直す（据え置くと変換エラー＝無音になる）。
-    private func handleSystem(_ pcm: AVAudioPCMBuffer) {
-        if stopping { return }
-        if sysNorm == nil || sysNormSrc != pcm.format {
-            if sysNormSrc != nil && sysNormSrc != pcm.format {
-                logErr("システム音: 取り込みフォーマット変化（\(Int(sysNormSrc?.sampleRate ?? 0))Hz → \(Int(pcm.format.sampleRate))Hz）に追従")
-            }
-            sysNorm = FormatNormalizer(from: pcm.format, sampleRate: Double(opt.sampleRate),
-                                       channels: AVAudioChannelCount(max(1, opt.channels)))
-            sysNormSrc = pcm.format
-        }
-        guard let out = sysNorm?.convert(pcm), out.frameLength > 0 else { return }
-        // 手動ゲイン適用（Auto 時は 0dB＝素通し）＋メーター用 RMS を取得。
-        storeLevel(applyGainAndLevel(out, sysGain), isSystem: true)
-        let pts = CMTime(value: sysFrames, timescale: CMTimeScale(opt.sampleRate))
-        if let sb = makeAudioSampleBuffer(from: out, pts: pts) {
-            sysBox?.append(sb); sysFrames += Int64(out.frameLength)
-        }
-    }
-
-    // mic: エンジン由来の PCM を同様に micBox へ。
-    private func handleMic(_ pcm: AVAudioPCMBuffer) {
-        if stopping { return }
-        if micNorm == nil {
-            micNorm = FormatNormalizer(from: pcm.format, sampleRate: Double(opt.sampleRate),
-                                       channels: AVAudioChannelCount(max(1, opt.channels)))
-        }
-        guard let out = micNorm?.convert(pcm), out.frameLength > 0 else { return }
-        storeLevel(applyGainAndLevel(out, micGain), isSystem: false)
-        let pts = CMTime(value: micFrames, timescale: CMTimeScale(opt.sampleRate))
-        if let sb = makeAudioSampleBuffer(from: out, pts: pts) {
-            micBox?.append(sb); micFrames += Int64(out.frameLength)
-        }
-    }
-
-    /// interleaved Float32 バッファへ手動ゲインをランプ乗算し、適用後 RMS を返す（メーター用）。
-    private func applyGainAndLevel(_ buf: AVAudioPCMBuffer, _ gain: ManualGain) -> Float {
-        let abl = UnsafeMutableAudioBufferListPointer(buf.mutableAudioBufferList)
-        guard abl.count >= 1, let data = abl[0].mData else { return 0 }
-        let base = data.assumingMemoryBound(to: Float.self)
-        let ch = max(1, Int(abl[0].mNumberChannels))
-        var chans: [UnsafeMutablePointer<Float>] = []
-        for c in 0..<ch { chans.append(base + c) }
-        return gain.process(chans, frames: Int(buf.frameLength), stride: ch)
-    }
-
     /// メーター用レベルを軽く平滑化して保持（アタック速め・リリース緩め）。
     private func storeLevel(_ v: Float, isSystem: Bool) {
         levelLock.lock()
@@ -814,8 +924,8 @@ final class Capture {
 
     /// control ファイル由来のソース別ゲイン（dB）をライブ適用する（timer から呼ぶ）。
     func applyControl(systemDb: Double, micDb: Double) {
-        sysGain.setTargetDb(systemDb)
-        micGain.setTargetDb(micDb)
+        sysLane?.setGainDb(systemDb)
+        micLane?.setGainDb(micDb)
     }
 
     /// 現在のメーターレベル (system, mic) を返す（timer から level ファイルへ書く）。
@@ -832,12 +942,18 @@ final class Capture {
         // まずコールバックを止めてから finalize（キャプチャ停止は同期的）。
         tap?.stop()
         mic?.stop()
+        // lane に積み残した分を処理しきってから writer を閉じる（末尾を切り落とさない）。
+        if let l = sysLane { sysStats = l.drain() }
+        if let l = micLane { micStats = l.drain() }
         finishAndExit(code: 0)
     }
 
     private func finishAndExit(code: Int32) {
         // 各ソースの取得フレーム数（0 なら無音＝取得不成立。障害切り分け用に残す）。
-        logErr("録音終了: source=\(opt.source) system=\(sysFrames)フレーム mic=\(micFrames)フレーム")
+        logErr("録音終了: source=\(opt.source) system=\(sysStats.frames)フレーム mic=\(micStats.frames)フレーム")
+        // 取りこぼしは無音で埋めてある。無言だと録音を聞き直すまで気づけないので必ず残す。
+        reportShortfall("システム音", sysStats, enabled: opt.source != "mic")
+        reportShortfall("マイク", micStats, enabled: opt.source != "system")
         let sys = sysBox?.finish()
         let mic = micBox?.finish()
         var ev: [String: Any] = ["event": "stopped", "source": opt.source]
@@ -852,6 +968,23 @@ final class Capture {
         }
         emitter.emit(ev)
         exit(code)
+    }
+
+    /// 取りこぼし（無音で埋めた区間）の報告。全体の 1% を超えたら警告として出す。
+    private func reportShortfall(
+        _ name: String, _ s: (frames: Int64, padded: Int64, dropped: Int64), enabled: Bool
+    ) {
+        guard enabled, s.frames > 0 else { return }
+        let ratio = Double(s.padded) / Double(s.frames)
+        let secs = Double(s.padded) / Double(opt.sampleRate)
+        if s.padded == 0 && s.dropped == 0 { return }
+        let msg = "\(name): 取りこぼし \(String(format: "%.1f", secs))秒（\(String(format: "%.1f", ratio * 100))%）を無音で補完"
+            + (s.dropped > 0 ? "・処理落ちで破棄 \(s.dropped) バッファ" : "")
+        if ratio > 0.01 {
+            logErr("⚠ \(msg)。CPU 負荷が高い可能性があります。")
+        } else {
+            logErr(msg)
+        }
     }
 }
 
