@@ -1,7 +1,11 @@
 import { Modal, Setting } from "obsidian";
 import * as path from "path";
 import type RemoteMeetingRecorderPlugin from "../main";
-import { resolveWhisperModel } from "../transcribe/resolveWhisper";
+import {
+  resolveWhisperModel,
+  DEFAULT_WHISPER_MODEL,
+  WHISPER_MODEL_OPTIONS,
+} from "../transcribe/resolveWhisper";
 import type { DupMode } from "../transcribe/insertTranscript";
 
 /** モーダルで選ばれた実行オプション。mode==="abort" なら実行しない。 */
@@ -10,13 +14,6 @@ export interface TranscribeOptionsResult {
   language: string;
   dupMode: DupMode;
 }
-
-/** モデル選択肢（設定と同じ並び）。 */
-const MODEL_OPTIONS: [string, string][] = [
-  ["large-v3-turbo-q5_0", "large-v3-turbo（高精度・やや重い）"],
-  ["small", "small（速い・バランス）"],
-  ["base", "base（最速・軽量）"],
-];
 
 /** 言語選択肢（設定と同じ並び）。 */
 const LANGUAGE_OPTIONS: [string, string][] = [
@@ -43,7 +40,7 @@ export class TranscribeOptionsModal extends Modal {
   ) {
     super(plugin.app);
     const s = plugin.settings;
-    this.model = s.whisperCppModel || "large-v3-turbo-q5_0";
+    this.model = s.whisperCppModel || DEFAULT_WHISPER_MODEL;
     // 言語は ja/en/auto の3択に正規化（未知の値は ja 扱い）
     this.language = LANGUAGE_OPTIONS.some(([v]) => v === s.transcribeLanguage)
       ? s.transcribeLanguage
@@ -67,7 +64,7 @@ export class TranscribeOptionsModal extends Modal {
       .setName("モデル")
       .setDesc("精度と速度のトレードオフ。既定は設定値。")
       .addDropdown((d) => {
-        for (const [value, label] of MODEL_OPTIONS) d.addOption(value, label);
+        for (const [value, label] of WHISPER_MODEL_OPTIONS) d.addOption(value, label);
         d.setValue(this.model).onChange((v) => {
           this.model = v;
           this.updateModelNote(modelNote);

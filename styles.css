@@ -132,7 +132,7 @@
   gap: 8px;
 }
 .rmr-row-label {
-  width: 100px;
+  width: 7em; /* 最長「システムゲート」（7文字）が収まる幅 */
   color: var(--text-muted);
   flex-shrink: 0;
   white-space: nowrap; /* 「手動ミキサー」等の項目名を折り返さない */
@@ -160,6 +160,10 @@
 .rmr-static {
   color: var(--text-muted);
   font-size: 0.9em;
+}
+/* 録音ビューの Whisper モデル未取得ヒント */
+.rmr-hint.rmr-model-missing {
+  color: var(--color-orange);
 }
 /* 表示/非表示の共通ユーティリティ（JS からの直接 style 操作を避ける） */
 .rmr-hidden {

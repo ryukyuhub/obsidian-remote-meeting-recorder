@@ -18,6 +18,7 @@ import {
   resolveWhisperModel,
   whisperDir,
   downloadWhisperModel,
+  DEFAULT_WHISPER_MODEL,
 } from "../transcribe/resolveWhisper";
 
 // 外部コマンドのタイムアウト（ms）
@@ -430,7 +431,7 @@ function transcribeChecks(ctx: RecorderContext): DoctorCheck[] {
   });
 
   const model = resolveWhisperModel(ctx.pluginDir, s.whisperCppModel);
-  const dlName = (s.whisperCppModel || "large-v3-turbo-q5_0").trim();
+  const dlName = (s.whisperCppModel || DEFAULT_WHISPER_MODEL).trim();
   out.push({
     id: "whispercpp-model",
     label: "Whisper モデル",

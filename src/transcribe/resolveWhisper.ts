@@ -8,6 +8,16 @@ const MODEL_DOWNLOAD_TIMEOUT_MS = 1_800_000;
 
 /* whisper.cpp バイナリ / モデルの解決（sysrec の resolveBin と共通の探索処理を使う）。 */
 
+/** 設定が空のときに使う既定モデル名。 */
+export const DEFAULT_WHISPER_MODEL = "large-v3-turbo-q5_0";
+
+/** モデル選択肢 [値, 表示名]（設定画面・録音ビュー・文字起こしモーダルで共通）。 */
+export const WHISPER_MODEL_OPTIONS: [string, string][] = [
+  [DEFAULT_WHISPER_MODEL, "large-v3-turbo（高精度・やや重い）"],
+  ["small", "small（速い・バランス）"],
+  ["base", "base（最速・軽量）"],
+];
+
 export function whisperDir(pluginDir: string): string {
   return path.join(pluginDir, "native", "whisper");
 }

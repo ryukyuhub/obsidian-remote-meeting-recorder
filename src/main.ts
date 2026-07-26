@@ -88,7 +88,8 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
   private watchers = new Map<string, SessionWatcher>();
   private embedTargets = new Map<string, TFile | null>();
   private handledTerminals = new Set<string>();
-  private recordingView: RecordingView | null = null;
+  // 開いている録音ビュー（split 等で複数あり得るので Set で全件に通知する）
+  private recordingViews = new Set<RecordingView>();
   private lastWarningSessionId: string | null = null;
   private finalizedCallbacks: Array<(ev: TerminalEvent) => void> = [];
 
@@ -256,6 +257,8 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
 
   async saveSettings(): Promise<void> {
     await this.saveData(this.settings);
+    // 設定画面と録音ビューの双方向同期: どこで変えても録音ビューに即反映する。
+    for (const v of this.recordingViews) v.refresh();
   }
 
   getPluginDir(): string {
@@ -275,10 +278,10 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
   // 録音ビュー
   // ================================================================
   registerRecordingView(view: RecordingView): void {
-    this.recordingView = view;
+    this.recordingViews.add(view);
   }
   unregisterRecordingView(view: RecordingView): void {
-    if (this.recordingView === view) this.recordingView = null;
+    this.recordingViews.delete(view);
   }
 
   async openRecordingView(): Promise<void> {
@@ -300,7 +303,7 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
       await this.saveSettings();
     }
     await this.openRecordingView();
-    this.recordingView?.setEmbedTarget(file);
+    for (const v of this.recordingViews) v.setEmbedTarget(file);
   }
 
   // ================================================================
@@ -409,7 +412,7 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
 
   private onTick(sessionId: string, elapsedSec: number): void {
     if (this.activeRecording?.sessionId !== sessionId) return;
-    this.recordingView?.setElapsed(elapsedSec);
+    for (const v of this.recordingViews) v.setElapsed(elapsedSec);
     this.controlWindow?.tick(elapsedSec);
   }
 
@@ -477,7 +480,7 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
         break;
     }
 
-    this.recordingView?.onTerminal();
+    for (const v of this.recordingViews) v.onTerminal();
     // 復旧完了したら handled をクリア（次の同一 id 再利用は無いが念のため保持しない）
     if (ev.event === "remixed") this.handledTerminals.delete(sessionId);
   }
@@ -561,6 +564,15 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
   // ================================================================
   // 常時前面ミニ制御ウィンドウ（§9.4・§14.3）
   // ================================================================
+  /** ミニ制御ウィンドウ設定の変更を即時反映する（録音中ならその場で開閉）。 */
+  applyControlWindowSetting(): void {
+    if (this.settings.enableControlWindow) {
+      this.maybeOpenControlWindow();
+    } else {
+      this.controlWindow?.close();
+    }
+  }
+
   private maybeOpenControlWindow(): void {
     if (!this.settings.enableControlWindow || !this.activeRecording) return;
     if (!this.controlWindow) this.controlWindow = new ControlWindowManager();
@@ -654,7 +666,7 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
       );
     }
 
-    this.recordingView?.refresh();
+    for (const v of this.recordingViews) v.refresh();
   }
 
   // ================================================================

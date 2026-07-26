@@ -3,7 +3,12 @@ import type RemoteMeetingRecorderPlugin from "./main";
 import type { RecorderSource } from "./types";
 import { binCandidates } from "./util/resolveBin";
 import { DoctorModal } from "./ui/DoctorModal";
-import { resolveWhisperModel, downloadWhisperModel } from "./transcribe/resolveWhisper";
+import {
+  resolveWhisperModel,
+  downloadWhisperModel,
+  DEFAULT_WHISPER_MODEL,
+  WHISPER_MODEL_OPTIONS,
+} from "./transcribe/resolveWhisper";
 
 /** プラグイン設定（設計書 §9.3）。録音ごとの値はビューが持ち、ここは初期プリセット。 */
 export interface RMRSettings {
@@ -301,9 +306,12 @@ export class RMRSettingTab extends PluginSettingTab {
 
     this.bindToggle(
       "常時前面ミニ制御ウィンドウ",
-      "録音中、波形と停止ボタンを会議アプリの前面に浮かべます。",
+      "録音中、波形と停止ボタンを会議アプリの前面に浮かべます。録音中に切り替えるとその場で開閉します。",
       () => s.enableControlWindow,
-      (v) => (s.enableControlWindow = v)
+      (v) => {
+        s.enableControlWindow = v;
+        this.plugin.applyControlWindowSetting();
+      }
     );
 
     // --- 文字起こし（Phase 6・whisper.cpp 同梱） ---
@@ -318,12 +326,6 @@ export class RMRSettingTab extends PluginSettingTab {
 
     // Whisper モデル: 選択 → その場で状態表示 → 未取得ならこの画面でダウンロード。
     // （以前は「診断（doctor）」に誘導していたが分かりにくいため設定画面で完結させる）
-    const modelOptions: [string, string][] = [
-      ["large-v3-turbo-q5_0", "large-v3-turbo（高精度・やや重い）"],
-      ["small", "small（速い・バランス）"],
-      ["base", "base（最速・軽量）"],
-    ];
-
     const modelSetting = new Setting(containerEl)
       .setName("Whisper モデル")
       .setDesc(
@@ -335,7 +337,7 @@ export class RMRSettingTab extends PluginSettingTab {
     const modelStatus = containerEl.createEl("p", { cls: "rmr-settings-note" });
     let dlButton: ButtonComponent;
 
-    const currentModelName = (): string => (s.whisperCppModel || "large-v3-turbo-q5_0").trim();
+    const currentModelName = (): string => (s.whisperCppModel || DEFAULT_WHISPER_MODEL).trim();
 
     const refreshModelStatus = (): void => {
       const name = currentModelName();
@@ -353,7 +355,7 @@ export class RMRSettingTab extends PluginSettingTab {
     };
 
     modelSetting.addDropdown((d) => {
-      for (const [value, label] of modelOptions) d.addOption(value, label);
+      for (const [value, label] of WHISPER_MODEL_OPTIONS) d.addOption(value, label);
       d.setValue(currentModelName()).onChange(async (v) => {
         s.whisperCppModel = v;
         await this.plugin.saveSettings();

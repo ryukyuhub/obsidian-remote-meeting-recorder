@@ -5,8 +5,22 @@ import type { MicDevice } from "../recorder/devices";
 import { WaveformRenderer } from "../audio/waveform";
 import { defaultFilename, formatElapsed } from "../util/time";
 import { pickMarkdownNote } from "./NotePicker";
+import {
+  resolveWhisperModel,
+  DEFAULT_WHISPER_MODEL,
+  WHISPER_MODEL_OPTIONS,
+} from "../transcribe/resolveWhisper";
 
 export const RECORDING_VIEW_TYPE = "rmr-recording-view";
+
+/** ノイズゲート選択肢（設定画面と同じ値・録音ビュー向けの短い表示名）。 */
+const GATE_OPTIONS: [string, string][] = [
+  ["off", "オフ"],
+  ["-48", "弱（-48）"],
+  ["-40", "標準（-40）"],
+  ["-34", "強（-34）"],
+  ["-28", "最強（-28）"],
+];
 
 /**
  * 主要 UI（設計書 §9.1）。タイトル → ライブ波形 → トランスポート → 設定パネル。
@@ -91,9 +105,12 @@ export class RecordingView extends ItemView {
     return this.plugin.activeRecording != null;
   }
 
-  /** 外部から呼ばれる: 録音状態が変わったので再描画。 */
+  /** 外部から呼ばれる: 録音状態・設定が変わったので再描画。録音中はメーターも繋ぎ直す。 */
   refresh(): void {
     this.render();
+    if (this.plugin.activeRecording && this.meterCanvases.length) {
+      this.startWaveform();
+    }
   }
 
   /** 外部（ファイル右クリック等）から埋め込み先ノートを設定して再描画。録音中は変更不可。 */
@@ -162,6 +179,8 @@ export class RecordingView extends ItemView {
     this.buildMonitorRow(panel);
     this.buildStaticRow(panel, "Format", "M4A（固定）");
     this.buildLevelRows(panel, active != null);
+    this.buildControlWindowRow(panel);
+    this.buildWhisperModelRow(panel);
 
     if (active) {
       panel.createDiv({
@@ -385,11 +404,86 @@ export class RecordingView extends ItemView {
         });
       }
     } else {
+      const agcOn = active ? active.agc === "on" : this.vAgc;
       this.buildCheckboxRow(panel, "Auto gain", {
-        checked: active ? active.agc === "on" : this.vAgc,
+        checked: agcOn,
         disabled: locked,
-        onChange: (checked) => (this.vAgc = checked),
+        onChange: (checked) => {
+          this.vAgc = checked;
+          // ノイズゲート行の表示/非表示が変わるので再描画（非録音時のみ来る）。
+          this.render();
+        },
       });
+      // ノイズゲート（無音カット）は AGC 有効時のみ効く・macOS のみ（設定画面と双方向同期）。
+      // sysrec 起動時の引数なので、録音中はロック（次の録音から反映）。
+      if (agcOn && process.platform === "darwin") {
+        const s = this.plugin.settings;
+        const src = active ? active.source : this.vSource;
+        if (src !== "system") {
+          this.buildGateRow(panel, "マイクゲート", locked, () => s.micNoiseGate, (v) => {
+            s.micNoiseGate = v;
+          });
+        }
+        if (src !== "mic") {
+          this.buildGateRow(panel, "システムゲート", locked, () => s.sysNoiseGate, (v) => {
+            s.sysNoiseGate = v;
+          });
+        }
+      }
+    }
+  }
+
+  /** ノイズゲート行（設定値と直結・変更は即保存）。 */
+  private buildGateRow(
+    panel: HTMLElement,
+    label: string,
+    locked: boolean,
+    get: () => string,
+    set: (v: string) => void
+  ): void {
+    const control = this.addRow(panel, label);
+    const select = control.createEl("select", { cls: "rmr-select dropdown" });
+    for (const [value, text] of GATE_OPTIONS) {
+      const opt = select.createEl("option", { text, value });
+      if (value === get()) opt.selected = true;
+    }
+    select.disabled = locked;
+    select.addEventListener("change", () => {
+      set(select.value);
+      void this.plugin.saveSettings();
+    });
+    control.createSpan({ cls: "rmr-hint", text: "無音カット" });
+  }
+
+  /** 常時前面ミニ制御ウィンドウ（設定値と直結・録音中も切り替えるとその場で開閉）。 */
+  private buildControlWindowRow(panel: HTMLElement): void {
+    this.buildCheckboxRow(panel, "ミニ制御窓", {
+      checked: this.plugin.settings.enableControlWindow,
+      hint: "録音中、波形と停止ボタンを最前面に表示",
+      onChange: (checked) => {
+        this.plugin.settings.enableControlWindow = checked;
+        this.plugin.applyControlWindowSetting();
+        void this.plugin.saveSettings();
+      },
+    });
+  }
+
+  /** Whisper モデル行（設定値と直結・未取得なら注意を出す）。 */
+  private buildWhisperModelRow(panel: HTMLElement): void {
+    const s = this.plugin.settings;
+    const current = (s.whisperCppModel || DEFAULT_WHISPER_MODEL).trim();
+    const control = this.addRow(panel, "Whisper");
+    const select = control.createEl("select", { cls: "rmr-select dropdown" });
+    for (const [value, text] of WHISPER_MODEL_OPTIONS) {
+      const opt = select.createEl("option", { text, value });
+      if (value === current) opt.selected = true;
+    }
+    select.addEventListener("change", () => {
+      s.whisperCppModel = select.value;
+      void this.plugin.saveSettings();
+    });
+    if (!resolveWhisperModel(this.plugin.getPluginDir(), current)) {
+      control.createSpan({ cls: "rmr-hint rmr-model-missing", text: "未取得（設定画面でDL）" });
     }
   }
 
