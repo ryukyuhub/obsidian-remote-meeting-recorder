@@ -26,6 +26,7 @@ export { SessionWatcher } from "./src/recorder/watch";
 export { restoreInProgressSessions } from "./src/recorder/restore";
 export { nextAgcState, initialAgcState, rmsOf, AGC_TARGET_RMS, AGC_GATE_RMS, AGC_MAX_GAIN, AGC_MIN_GAIN } from "./src/recorder/agc";
 export { nextNormalizerState, initialNormalizerState, NORM_TARGET_RMS, NORM_GATE_RMS, NORM_MAX_GAIN, NORM_MIN_GAIN, NORM_WARMUP_SEC } from "./src/recorder/agc";
+export { nextGateState, initialGateState, gateOpenRmsOf, GATE_FLOOR, GATE_HOLD_SEC, GATE_OPEN_TAU, GATE_CLOSE_TAU } from "./src/recorder/agc";
 `;
 const result = await build({
   stdin: { contents: entry, resolveDir: repoRoot, sourcefile: "e2e-entry.ts", loader: "ts" },
@@ -388,6 +389,10 @@ async function testDspContract() {
     ["norm.gateRms", spec.norm?.gateRms, api.NORM_GATE_RMS],
     ["norm.minGain", spec.norm?.minGain, api.NORM_MIN_GAIN],
     ["norm.maxGain", spec.norm?.maxGain, api.NORM_MAX_GAIN],
+    ["gate.floor", spec.gate?.floor, api.GATE_FLOOR],
+    ["gate.holdSec", spec.gate?.holdSec, api.GATE_HOLD_SEC],
+    ["gate.openTau", spec.gate?.openTau, api.GATE_OPEN_TAU],
+    ["gate.closeTau", spec.gate?.closeTau, api.GATE_CLOSE_TAU],
   ];
   for (const [name, swiftVal, tsVal] of pairs) {
     ok(
@@ -522,9 +527,53 @@ function testWebAgcCore() {
 }
 
 // ====================================================================
+// Windows(Web Audio) のノイズゲート中核。macOS の sysrec NoiseGate（DspKit.swift）と
+// 同じ挙動になっているかを数値で確認する（Windows 実機が無くても回帰を検出できるように）。
+function testWebGateCore() {
+  console.log("\n[15] Windows ノイズゲートの中核ロジック（macOS NoiseGate と同値）");
+  const dt = 0.1;
+  const open = api.gateOpenRmsOf("-40"); // 10^(-40/20) = 0.01
+
+  // 1) 閾値の解釈: "off"/不正値は無効、dBFS 文字列は線形 RMS へ。
+  ok(api.gateOpenRmsOf("off") === null, `"off" はゲート無効（null）`);
+  ok(api.gateOpenRmsOf("ほげ") === null, "不正値はゲート無効（null）");
+  ok(Math.abs(open - 0.01) < 1e-12, `"-40" の開閾値は線形 0.01（実際: ${open}）`);
+
+  // 2) 有音（閾値超え）なら 1 tick でほぼ全開する（開 8ms ≪ dt。語頭を切らない）。
+  let s = { gain: 0, hold: 0 };
+  s = api.nextGateState(0.02, open, s, dt);
+  ok(s.gain > 0.99, `有音で 1 tick で開く（実際: ${s.gain.toFixed(4)}）`);
+
+  // 3) 無音になっても hold(0.2s) の間は開いたまま（息継ぎ・語間で切れない）。
+  s = api.nextGateState(0.001, open, s, dt);
+  ok(s.gain > 0.99, `無音 ${dt}s では hold で開いたまま（実際: ${s.gain.toFixed(4)}）`);
+
+  // 4) hold が切れたら緩やかに閉じ始める（閉 150ms。1 tick で全閉しない＝チャタリング防止）。
+  const beforeClose = s.gain;
+  s = api.nextGateState(0.001, open, s, dt);
+  ok(
+    s.gain < beforeClose && s.gain > 0.3,
+    `hold 後は緩やかに閉じる（${beforeClose.toFixed(3)} → ${s.gain.toFixed(3)}）`
+  );
+
+  // 5) 無音が続けば floor（0）までほぼ全閉する。
+  for (let i = 0; i < 20; i++) s = api.nextGateState(0.001, open, s, dt);
+  ok(s.gain < 0.01, `無音 2s でほぼ全閉（実際: ${s.gain.toExponential(2)}）`);
+
+  // 6) 全閉からの再有音でも 1 tick で開き直す（再アーム不要・語頭を切らない）。
+  s = api.nextGateState(0.02, open, s, dt);
+  ok(s.gain > 0.99, `全閉から即再開する（実際: ${s.gain.toFixed(4)}）`);
+
+  // 7) 境界: 閾値ちょうどは有音（>= 判定・sysrec と同じ）。
+  const at = api.nextGateState(open, open, { gain: 0, hold: 0 }, dt);
+  ok(at.gain > 0.99, "閾値ちょうどの入力は有音として開く（>= 判定）");
+}
+
+// ====================================================================
 try {
   testWebAgcCore();
   testWebNormalizerCore();
+  testWebGateCore();
   await testDspContract();
   await testSingle();
   await testBothMixOk();

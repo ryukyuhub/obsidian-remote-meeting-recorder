@@ -43,6 +43,10 @@ export async function startWebRecording(
     manualMix: o.manualMix,
     systemGainDb: o.systemGainDb,
     micGainDb: o.micGainDb,
+    // ノイズゲート閾値（"off" もしくは dBFS）。マイク／システム音で独立。
+    // AGC・手動ミキサーのどちらとも独立に効く（macOS と同じ規則）。
+    micGate: ctx.settings.micNoiseGate,
+    sysGate: ctx.settings.sysNoiseGate,
     onTerminated: () => onTerminated(id),
     onSilence,
   });

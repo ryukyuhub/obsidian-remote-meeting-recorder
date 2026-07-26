@@ -159,7 +159,8 @@ function buildArgv(
     // メーター/ミキサー用（Auto/Manual 両モードで level は出力される）。
     "--control-file", sp.control,
     "--level-file", sp.level,
-    // ノイズゲート閾値（AGC 有効時のみ効く・"off" もしくは dBFS）。マイク／システム音で独立。
+    // ノイズゲート閾値（"off" もしくは dBFS）。マイク／システム音で独立。AGC・手動ミキサーの
+    // どちらとも独立に効く（切りたいときはゲート自体を "off" にする）。
     "--mic-gate", ctx.settings.micNoiseGate,
     "--sys-gate", ctx.settings.sysNoiseGate,
   ];

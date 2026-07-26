@@ -97,10 +97,11 @@ struct Options {
     var micGainDb: Double = 0
     var controlFile: String? = nil        // プラグインが書く {systemGainDb,micGainDb} を polling
     var levelFile: String? = nil          // sysrec が {system,mic} の RMS を定期出力
-    // マイクのノイズゲート（AGC 有効時）。micGate=false でオフ。閾値は dBFS。
+    // マイクのノイズゲート。micGate=false でオフ。閾値は dBFS。
+    // AGC・手動ミキサーのどちらとも独立に効く（切るのはこのオプションのみ）。
     var micGate: Bool = true
     var micGateDb: Double = -40
-    // システム音のノイズゲート（AGC 有効時）。既定オフ（相手の声を切らないため）。
+    // システム音のノイズゲート。既定オフ（相手の声を切らないため）。
     var sysGate: Bool = false
     var sysGateDb: Double = -40
 }
@@ -160,13 +161,13 @@ final class WriterBox {
     private var failed = false
     private let agc: AGCProcessor?
     private let limiter = StreamingLimiter()
-    private let noiseGate: NoiseGate?  // マイク（gate=true）かつ AGC 有効時のみ
+    private let noiseGate: NoiseGate?  // gate=true のときのみ（AGC のオン/オフとは独立）
 
     init(path: String, label: String, agc: Bool, gate: Bool = false, gateDb: Double = -40) {
         self.path = path
         self.label = label
         self.agc = agc ? AGCProcessor() : nil
-        self.noiseGate = (agc && gate) ? NoiseGate(thresholdDb: gateDb) : nil
+        self.noiseGate = gate ? NoiseGate(thresholdDb: gateDb) : nil
     }
 
     /// サンプルバッファを追記する（必要なら初回にライタ生成）。
@@ -853,8 +854,9 @@ final class Capture {
     init(_ opt: Options, _ emitter: Emitter) {
         self.opt = opt; self.emitter = emitter
         // 出力先パスの用意（both は中間 2 ファイル）
-        // AGC 有効時、ソース別にノイズゲート（無音を著しく減衰）を掛ける。閾値・オンオフは設定で可変。
-        // マイクは既定オン(-40dBFS)、システム音は既定オフ（相手の声を切らないため）。
+        // ソース別にノイズゲート（無音を著しく減衰）を掛ける。閾値・オンオフは設定で可変で、
+        // AGC・手動ミキサーとは独立。マイクは既定オン(-40dBFS)、システム音は既定オフ
+        // （相手の声を切らないため）。
         if opt.source == "both" {
             let base = (opt.out as NSString).deletingPathExtension
             sysBox = WriterBox(path: base + ".sys.m4a", label: "system", agc: opt.agc,
@@ -1256,6 +1258,12 @@ struct SysRec {
                     "maxGain": NormSpec.maxGain,
                     "silenceRms": NormSpec.silenceRMS,
                     "limiterCeiling": NormSpec.ceiling,
+                ],
+                "gate": [
+                    "floor": NoiseGate.floor,
+                    "holdSec": NoiseGate.holdSec,
+                    "openTau": NoiseGate.openTau,
+                    "closeTau": NoiseGate.closeTau,
                 ],
             ]
             if let d = try? JSONSerialization.data(withJSONObject: spec, options: [.sortedKeys]),

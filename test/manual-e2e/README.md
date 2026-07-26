@@ -50,8 +50,13 @@
 1. `Obsidian.exe --remote-debugging-port=9222 "obsidian://open?vault=<vault>"` で起動（テスト時のみ。終了後は通常起動に戻す）
 2. `open-recording-view` コマンドで録音ビューを開く（`start-recording` コマンドは**ビューを開くだけ**で録音は始まらない）
 3. ビューの `vSource` 等の値を渡して `plugin.startRecordingFromView({...})` を直接呼ぶと録音開始
-4. テスト音源は PowerShell（`System.Windows.Media.MediaPlayer`）で既存 m4a を再生してループバックに流す
+4. テスト音源は PowerShell の `System.Media.SoundPlayer.PlaySync()`（WAV・同期ブロッキング）で再生してループバックに流す。`System.Windows.Media.MediaPlayer` は再生時間が不安定（20 秒音源で 46 秒録音になった実例・2026-07-27）なので使わない
 5. `stop-recording` コマンドで停止 → ffmpeg（`~/.meeting-recorder/bin/ffmpeg.exe`）でチャンネル・レベル検証、sessions 後始末・ノート埋め込み・文字起こし挿入をファイルで確認
+
+自動駆動の落とし穴（2026-07-27 のゲート自動ランで確立）:
+
+- **data.json を PowerShell で書き換えるときは BOM 無し必須**。`Set-Content -Encoding utf8` は BOM 付きで書き、Obsidian の `JSON.parse` が失敗して `loadData()` が黙って `undefined` を返し、**設定が全てデフォルトへフォールバックする**（エラー表示なし）。`[System.Text.UTF8Encoding]::new($false)` で書くこと。書き換えは Obsidian を閉じてから・元内容の退避も忘れずに。
+- 合成音源（トーン/ノイズ）のテストでは `transcribeOnStop: false` にしておく（whisper が非音声入力へ幻覚的な文字起こしを出す・既知特性）。
 
 ### 公式 Obsidian CLI（2026-07-25 導入済み・第一選択）
 

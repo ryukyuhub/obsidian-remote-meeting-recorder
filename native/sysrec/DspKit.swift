@@ -288,13 +288,16 @@ func scaledBitrate(_ base: Int, sampleRate: Int) -> Int {
     return max(32000, v)
 }
 
-/// ノイズゲート（マイク用・AGC 有効時）。入力 RMS が閾値未満（＝無音/環境ノイズ）のとき
+/// ノイズゲート（無音カット）。入力 RMS が閾値未満（＝無音/環境ノイズ）のとき
 /// 出力ゲインを floor（ほぼ 0）へ落として録音レベルを著しく下げる。閾値超えで素早く開き、
 /// 有音が hold を超えて途切れたら緩やかに閉じる（語尾切れ・チャタリングを避ける）。
-/// 判定は AGC で持ち上げる前の生入力 RMS で行う（AGC と綱引きしないため）。
+/// AGC のオン/オフとは独立に効く。判定は AGC で持ち上げる前の生入力 RMS で行う
+/// （AGC 有効時にノイズ床が増幅されても判定がぶれない＝綱引きしないため）。
 final class NoiseGate {
     static let floor: Float = 0.0        // 閉時ゲイン（0＝ほぼ無音）
     static let holdSec: Double = 0.2     // 有音が途切れても開けておく保持時間
+    static let openTau: Double = 0.008   // 開の時定数（速く開いて語頭を切らない）
+    static let closeTau: Double = 0.15   // 閉の時定数（緩やかに閉じて語尾を切らない）
     private let openRMS: Float           // これ以上を「有音」とみなして開く（閾値・可変）
     private var gain: Float = 1.0
     private var hold: Double = 0
@@ -310,7 +313,7 @@ final class NoiseGate {
         if inputRMS >= openRMS { hold = Self.holdSec } else { hold = max(0, hold - dt) }
         let target: Float = hold > 0 ? 1.0 : Self.floor
         let prev = gain
-        let tau = target > gain ? 0.008 : 0.15   // 開:速い(8ms) / 閉:緩やか(150ms)
+        let tau = target > gain ? Self.openTau : Self.closeTau
         gain += (target - gain) * Float(1 - exp(-dt / tau))
         let dg = (gain - prev) / Float(frames)
         for ch in channels {

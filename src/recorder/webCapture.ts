@@ -13,11 +13,16 @@ import { statBytes } from "../util/fsx";
 import { getElectronRemote } from "../platform/electron";
 import {
   initialAgcState,
+  initialGateState,
   initialNormalizerState,
+  gateOpenRmsOf,
   nextAgcState,
+  nextGateState,
   nextNormalizerState,
   rmsOf,
+  GATE_OPEN_TAU,
   type AgcState,
+  type GateState,
   type NormalizerState,
 } from "./agc";
 import type { RecorderSource } from "../types";
@@ -100,6 +105,13 @@ export interface WebRecorderOptions {
   manualMix?: boolean;
   systemGainDb?: number;
   micGainDb?: number;
+  /**
+   * ノイズゲート閾値（無音カット）。"off" もしくは dBFS 文字列（例 "-40"）。
+   * AGC・手動ミキサーのどちらとも独立に効く。macOS の `--mic-gate` / `--sys-gate` と
+   * 同じ表現・同じ規則。
+   */
+  micGate?: string;
+  sysGate?: string;
   /** 予期しない終了（トラック切断・録音エラー・onunload 以外の停止）で呼ばれる。 */
   onTerminated?: () => void;
   /** 開始直後にレベルが 0 のままだった（＝音が入っていない）ときに 1 度だけ呼ばれる。 */
@@ -119,26 +131,31 @@ const AGC_TICK_MS = 100;
 
 /**
  * 1 ソース分の処理チェーン:
- *   source → gain(手動) → agcGain(自動) → normGain(仕上げ正規化) → limiter → dest
- * 測定タップは 2 箇所。`analyser` は手動フェーダー直後（メーター表示と AGC 入力）、
- * `postAgcAnalyser` は AGC 直後（正規化の入力）。macOS の normalize が「AGC 済みの録音
- * ファイル」を測るのと同じ位置に合わせるため、正規化だけ測定点が後ろになる。
+ *   source → gain(手動) → agcGain(自動) → gateGain(無音カット) → normGain(仕上げ正規化) → limiter → dest
+ * 測定タップは 2 箇所。`analyser` は手動フェーダー直後（メーター表示・AGC 入力・ゲート判定）、
+ * `postAgcAnalyser` はゲート直後（正規化の入力）。macOS の normalize が「AGC・ゲート済みの
+ * 録音ファイル」を測るのと同じ位置に合わせるため、正規化だけ測定点が後ろになる。
  */
 interface SourceChain {
   /** 手動ミキサーのフェーダー。 */
   gain: GainNode;
   /** AGC が動かすゲイン（AutoGain オフなら 1.0 のまま）。 */
   agcGain: GainNode;
+  /** ノイズゲート（無音カット）のゲイン（ゲート無効なら 1.0 のまま）。 */
+  gateGain: GainNode;
   /** 仕上げ正規化の静的ゲイン（AutoGain のオン/オフに関わらず常時動く）。 */
   normGain: GainNode;
   /** 手動フェーダー直後のタップ（メーター表示と AGC 測定の両方に使う）。 */
   analyser: AnalyserNode;
-  /** AGC 直後のタップ（正規化の測定用・行き止まり）。 */
+  /** ゲート直後のタップ（正規化の測定用・行き止まり）。 */
   postAgcAnalyser: AnalyserNode;
   meterData: Uint8Array<ArrayBuffer>;
   rmsData: Float32Array<ArrayBuffer>;
   postRmsData: Float32Array<ArrayBuffer>;
   agc: AgcState;
+  gate: GateState;
+  /** ゲートの開閾値（線形 RMS）。null はゲート無効＝gateGain 1.0 のまま。 */
+  gateOpenRms: number | null;
   norm: NormalizerState;
 }
 
@@ -194,6 +211,9 @@ export class WebRecorder {
     this.manualMix = !!o.manualMix;
     // 手動ミキサーは AGC と排他（macOS の argv 組み立てと同じ規則）。
     this.agc = !!o.agc && !o.manualMix;
+    // ノイズゲートは AGC・手動ミキサーのどちらとも独立（切るのはゲート設定 "off" のみ）。
+    this.micGateOpenRms = gateOpenRmsOf(o.micGate ?? "off");
+    this.sysGateOpenRms = gateOpenRmsOf(o.sysGate ?? "off");
     this.initSysGainDb = o.systemGainDb ?? 0;
     this.initMicGainDb = o.micGainDb ?? 0;
     this.onTerminated = o.onTerminated;
@@ -202,6 +222,8 @@ export class WebRecorder {
 
   private readonly initSysGainDb: number;
   private readonly initMicGainDb: number;
+  private readonly micGateOpenRms: number | null;
+  private readonly sysGateOpenRms: number | null;
 
   /** 録音開始。ストリーム取得・ミックス・MediaRecorder 起動まで。失敗時は throw（呼び出し側で StartError 化）。 */
   async start(): Promise<void> {
@@ -255,10 +277,15 @@ export class WebRecorder {
     limiter.release.value = 0.1;
     limiter.connect(dest);
 
-    // ソースごとに source → gain(手動フェーダー) → agcGain(AutoGain) → limiter → dest。
+    // ソースごとに source → gain(手動フェーダー) → agcGain(AutoGain) → gateGain(無音カット)
+    // → normGain(仕上げ正規化) → limiter → dest。
     // Analyser は手動フェーダー直後（＝AGC 適用前）から分岐する。メーターは「録音される
-    // 手動バランス」を表し、同じ値を AGC の入力 RMS 測定にも使う（macOS と同じ測り方）。
-    const connectSource = (s: MediaStream | null, initialDb: number): SourceChain | null => {
+    // 手動バランス」を表し、同じ値を AGC の入力 RMS 測定とゲート判定にも使う（macOS と同じ測り方）。
+    const connectSource = (
+      s: MediaStream | null,
+      initialDb: number,
+      gateOpenRms: number | null
+    ): SourceChain | null => {
       if (!s || s.getAudioTracks().length === 0) return null;
       // ソースノードへ渡すラッパー MediaStream も参照を握る（これも回収対象になり得る）。
       const graphStream = new MediaStream(s.getAudioTracks());
@@ -271,8 +298,12 @@ export class WebRecorder {
       analyser.fftSize = 256;
       const agcGain = this.audioCtx!.createGain();
       agcGain.gain.value = 1;
-      // 仕上げ正規化。AGC の後ろ・リミッターの手前に置く（macOS の 録音時AGC → normalize →
-      // リミッター と同じ並び）。持ち上げた結果のピークは後段のリミッターが抑える。
+      // ノイズゲート（無音カット）。sysrec の NoiseGate と同じく AGC の後段でゲートゲインを
+      // 乗じ、判定は AGC 前の生 RMS で行う（AGC と綱引きしないため）。無効時は 1.0 のまま素通し。
+      const gateGain = this.audioCtx!.createGain();
+      gateGain.gain.value = 1;
+      // 仕上げ正規化。ゲートの後ろ・リミッターの手前に置く（macOS の 録音時AGC・ゲート →
+      // normalize → リミッター と同じ並び）。持ち上げた結果のピークは後段のリミッターが抑える。
       const normGain = this.audioCtx!.createGain();
       normGain.gain.value = 1;
       const postAgcAnalyser = this.audioCtx!.createAnalyser();
@@ -280,12 +311,14 @@ export class WebRecorder {
       node.connect(gain);
       gain.connect(analyser);
       gain.connect(agcGain);
-      agcGain.connect(postAgcAnalyser); // 測定用の分岐（行き止まり）
-      agcGain.connect(normGain);
+      agcGain.connect(gateGain);
+      gateGain.connect(postAgcAnalyser); // 測定用の分岐（行き止まり）
+      gateGain.connect(normGain);
       normGain.connect(limiter);
       return {
         gain,
         agcGain,
+        gateGain,
         normGain,
         analyser,
         postAgcAnalyser,
@@ -293,11 +326,13 @@ export class WebRecorder {
         rmsData: new Float32Array(new ArrayBuffer(analyser.fftSize * 4)),
         postRmsData: new Float32Array(new ArrayBuffer(postAgcAnalyser.fftSize * 4)),
         agc: initialAgcState(),
+        gate: initialGateState(),
+        gateOpenRms,
         norm: initialNormalizerState(),
       };
     };
-    this.sysChain = connectSource(this.systemStream, this.initSysGainDb);
-    this.micChain = connectSource(this.micStream, this.initMicGainDb);
+    this.sysChain = connectSource(this.systemStream, this.initSysGainDb, this.sysGateOpenRms);
+    this.micChain = connectSource(this.micStream, this.initMicGainDb, this.micGateOpenRms);
 
     // 逐次追記の出力先。開けないまま録音を続けると「録れたつもりでゼロバイト」の
     // サイレント消失になるため、open を確認してから先へ進む（起動検証・設計書 §5.2 の思想）。
@@ -458,11 +493,27 @@ export class WebRecorder {
     const dt = AGC_TICK_MS / 1000;
     const now = this.audioCtx.currentTime;
 
-    if (this.agc) {
+    // AGC とノイズゲートは同じ生 RMS（手動フェーダー直後・AGC 前）で判定する。
+    // ゲートは AGC のオン/オフとは独立に動く（sysrec と同じ）。
+    if (this.agc || chain.gateOpenRms != null) {
       chain.analyser.getFloatTimeDomainData(chain.rmsData);
-      chain.agc = nextAgcState(rmsOf(chain.rmsData), chain.agc, dt);
-      // ゲイン変更は setTargetAtTime で滑らかに当てる（急変のジッパーノイズを避ける）。
-      chain.agcGain.gain.setTargetAtTime(chain.agc.gain, now, 0.05);
+      const rms = rmsOf(chain.rmsData);
+      if (this.agc) {
+        chain.agc = nextAgcState(rms, chain.agc, dt);
+        // ゲイン変更は setTargetAtTime で滑らかに当てる（急変のジッパーノイズを避ける）。
+        chain.agcGain.gain.setTargetAtTime(chain.agc.gain, now, 0.05);
+      }
+      // ノイズゲート（無音カット）。開くときは語頭を切らないよう時定数も速く（8ms）、
+      // 閉じは状態側の 150ms 減衰に任せてノードは tick 間の補間だけを行う。
+      if (chain.gateOpenRms != null) {
+        const prevGateGain = chain.gate.gain;
+        chain.gate = nextGateState(rms, chain.gateOpenRms, chain.gate, dt);
+        chain.gateGain.gain.setTargetAtTime(
+          chain.gate.gain,
+          now,
+          chain.gate.gain > prevGateGain ? GATE_OPEN_TAU : 0.05
+        );
+      }
     }
 
     // 仕上げ正規化は AGC 適用後を測る（macOS が AGC 済みファイルを測るのと同じ位置）。

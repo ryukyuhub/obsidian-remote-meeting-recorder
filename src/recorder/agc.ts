@@ -148,6 +148,63 @@ export function nextNormalizerState(
   return next;
 }
 
+// ============================================================
+// ノイズゲート（Windows 版・無音カット）
+// ============================================================
+//
+// macOS の sysrec `NoiseGate`（DspKit.swift）と同じ挙動。AGC・手動ミキサーのどちらとも
+// 独立に効く（切るのはゲート設定 "off" のみ）。生入力（AGC 前）の RMS が閾値未満（＝無音/環境ノイズ）のとき
+// 出力ゲインを floor（0）へ落として録音レベルを著しく下げる。閾値超えで素早く開き、有音が
+// hold を超えて途切れたら緩やかに閉じる（語尾切れ・チャタリングを避ける）。
+// 判定を AGC 前の生 RMS で行うのは、AGC が持ち上げた無音ノイズに反応して綱引きしないため。
+
+/** 閉時ゲイン（0＝ほぼ無音）。 */
+export const GATE_FLOOR = 0;
+/** 有音が途切れても開けておく保持時間（秒）。 */
+export const GATE_HOLD_SEC = 0.2;
+/** 開の時定数（秒）。速く開いて語頭を切らない。 */
+export const GATE_OPEN_TAU = 0.008;
+/** 閉の時定数（秒）。緩やかに閉じて語尾を切らない。 */
+export const GATE_CLOSE_TAU = 0.15;
+
+export interface GateState {
+  /** 現在のゲートゲイン（線形・1=開 / 0=閉）。 */
+  gain: number;
+  /** 残り保持時間（秒）。有音を検出するたび GATE_HOLD_SEC へ再チャージ。 */
+  hold: number;
+}
+
+export function initialGateState(): GateState {
+  return { gain: 1, hold: 0 };
+}
+
+/**
+ * 設定値（"off" もしくは dBFS 文字列・例 "-40"）→ 開閾値の線形 RMS。
+ * "off"・不正値は null（＝ゲート無効）。macOS の `--mic-gate`/`--sys-gate` と同じ表現。
+ */
+export function gateOpenRmsOf(threshold: string): number | null {
+  if (threshold === "off") return null;
+  const db = Number(threshold);
+  return Number.isFinite(db) ? Math.pow(10, db / 20) : null;
+}
+
+/**
+ * 1 tick 進めた次の状態を返す（純関数・状態は書き換えない）。
+ * @param rms **AGC 適用前**の生入力チャンク RMS（0..1）
+ * @param openRms 開閾値（線形 RMS）。これ以上を「有音」とみなす（>= 判定・sysrec と同じ）
+ */
+export function nextGateState(
+  rms: number,
+  openRms: number,
+  prev: GateState,
+  dtSec: number
+): GateState {
+  const hold = rms >= openRms ? GATE_HOLD_SEC : Math.max(0, prev.hold - dtSec);
+  const target = hold > 0 ? 1 : GATE_FLOOR;
+  const tau = target > prev.gain ? GATE_OPEN_TAU : GATE_CLOSE_TAU;
+  return { gain: prev.gain + (target - prev.gain) * (1 - Math.exp(-dtSec / tau)), hold };
+}
+
 /** 時間領域サンプル列の RMS（0..1）。 */
 export function rmsOf(samples: Float32Array): number {
   if (samples.length === 0) return 0;

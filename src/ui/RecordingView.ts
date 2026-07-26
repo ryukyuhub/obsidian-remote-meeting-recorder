@@ -437,32 +437,27 @@ export class RecordingView extends ItemView {
         });
       }
     } else {
-      const agcOn = active ? active.agc === "on" : this.vAgc;
       this.buildCheckboxRow(panel, "Auto gain", {
-        checked: agcOn,
+        checked: active ? active.agc === "on" : this.vAgc,
         disabled: locked,
-        onChange: (checked) => {
-          this.vAgc = checked;
-          // ノイズゲート行の表示/非表示が変わるので再描画（非録音時のみ来る）。
-          this.render();
-        },
+        onChange: (checked) => (this.vAgc = checked),
       });
-      // ノイズゲート（無音カット）は AGC 有効時のみ効く・macOS のみ（設定画面と双方向同期）。
-      // sysrec 起動時の引数なので、録音中はロック（次の録音から反映）。
-      if (agcOn && process.platform === "darwin") {
-        const s = this.plugin.settings;
-        const src = active ? active.source : this.vSource;
-        if (src !== "system") {
-          this.buildGateRow(panel, "マイクゲート", locked, () => s.micNoiseGate, (v) => {
-            s.micNoiseGate = v;
-          });
-        }
-        if (src !== "mic") {
-          this.buildGateRow(panel, "システムゲート", locked, () => s.sysNoiseGate, (v) => {
-            s.sysNoiseGate = v;
-          });
-        }
-      }
+    }
+
+    // ノイズゲート（無音カット）は AGC・手動ミキサーのどちらとも独立に効く（切るのはゲート
+    // 設定の「オフ」のみ・設定画面と双方向同期）。録音開始時に固定される値
+    // （macOS: sysrec 引数 / Windows: Web 録音の初期化）なので、録音中はロック（次の録音から反映）。
+    const s = this.plugin.settings;
+    const gateSrc = active ? active.source : this.vSource;
+    if (gateSrc !== "system") {
+      this.buildGateRow(panel, "マイクゲート", locked, () => s.micNoiseGate, (v) => {
+        s.micNoiseGate = v;
+      });
+    }
+    if (gateSrc !== "mic") {
+      this.buildGateRow(panel, "システムゲート", locked, () => s.sysNoiseGate, (v) => {
+        s.sysNoiseGate = v;
+      });
     }
   }
 
