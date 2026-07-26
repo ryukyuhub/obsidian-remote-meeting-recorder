@@ -202,6 +202,39 @@ func applyStaticGain(_ buf: AVAudioPCMBuffer, _ g: Float) {
     }
 }
 
+/// 書き出しの分割単位（フレーム）。48kHz で 10 秒ぶん。
+let writeChunkFrames: AVAudioFrameCount = 48_000 * 10
+
+/// AAC への書き出しは必ず分割して行う。`AVAudioFile.write(from:)` に数十分ぶんの
+/// 巨大バッファを一度に渡すと、エンコーダ内部の処理時間が長さに対して急激に伸び、
+/// 長時間録音の mix / normalize が事実上終わらなくなる（73 分の録音で 20 分以上
+/// CPU を回しても書き終わらず、その間に Obsidian が終了すると moov を欠いた
+/// 再生不能な m4a が残る）。呼び出し側から見た結果は一括書き込みと同じ。
+func writeInChunks(_ file: AVAudioFile, _ buf: AVAudioPCMBuffer) throws {
+    let total = buf.frameLength
+    let chCount = Int(buf.format.channelCount)
+    guard total > writeChunkFrames, chCount > 0, let src = buf.floatChannelData,
+          let chunk = AVAudioPCMBuffer(pcmFormat: buf.format, frameCapacity: writeChunkFrames),
+          let dst = chunk.floatChannelData else {
+        try file.write(from: buf)
+        return
+    }
+    let srcStride = buf.stride
+    let dstStride = chunk.stride
+    var pos: AVAudioFrameCount = 0
+    while pos < total {
+        let nn = Int(min(writeChunkFrames, total - pos))
+        chunk.frameLength = AVAudioFrameCount(nn)
+        for c in 0..<chCount {
+            let s = src[c] + Int(pos) * srcStride
+            let d = dst[c]
+            for i in 0..<nn { d[i * dstStride] = s[i * srcStride] }
+        }
+        try file.write(from: chunk)
+        pos += AVAudioFrameCount(nn)
+    }
+}
+
 /// オフライン・ルックアヘッドリミッター（ミックス最終段）。5ms 先読みの
 /// スライディング最小値（単調キュー）で必要ゲインを先取りし、クリックなしで
 /// ピークを ceiling 以下へ抑える。リリース約 50ms。

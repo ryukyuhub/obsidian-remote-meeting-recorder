@@ -1,7 +1,10 @@
+import * as path from "path";
 import type { RecorderContext } from "../context";
-import type { SessionMeta } from "../types";
+import type { PendingRecovery, SessionMeta } from "../types";
 import { listSessions, finalizeCleanup } from "../state/sessionStore";
+import { sessionPaths } from "../state/paths";
 import { isAlive } from "./spawn";
+import { parseDurationSec } from "./stop";
 import { sweepOrphans, hasSalvageableIntermediate } from "./sweep";
 
 export interface RestoreResult {
@@ -39,4 +42,17 @@ export function restoreInProgressSessions(ctx: RecorderContext): RestoreResult {
     }
   }
   return { active, needsRemix, interruptedWeb };
+}
+
+/**
+ * 復旧待ち録音の表示情報を組み立てる（どの録音かを利用者に示すため・Issue #6）。
+ * 長さは status ファイルの stopped 行から拾う（無ければ省略）。
+ */
+export function toPendingRecovery(ctx: RecorderContext, meta: SessionMeta): PendingRecovery {
+  return {
+    sessionId: meta.id,
+    label: meta.label ?? path.basename(meta.out, path.extname(meta.out)),
+    startedAt: meta.startedAt,
+    durationSec: parseDurationSec(sessionPaths(ctx.paths, meta.id).status),
+  };
 }

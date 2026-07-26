@@ -208,7 +208,12 @@ export async function remix(ctx: RecorderContext, opts: RemixOptions): Promise<T
   if (opts.sessionId) {
     const meta = readSessionMeta(sessionPaths(ctx.paths, opts.sessionId).json);
     if (!meta) {
-      return { event: "remix-error", sessionId: id, message: "セッションが見つかりません" };
+      return {
+        event: "remix-error",
+        sessionId: id,
+        message: "セッションが見つかりません",
+        recoverable: false,
+      };
     }
     out = meta.out;
     source = meta.source;
@@ -217,10 +222,21 @@ export async function remix(ctx: RecorderContext, opts: RemixOptions): Promise<T
   if (opts.agc) agc = opts.agc; // 引数優先
 
   if (!out) {
-    return { event: "remix-error", sessionId: id, message: "出力パスが特定できません" };
+    return {
+      event: "remix-error",
+      sessionId: id,
+      message: "出力パスが特定できません",
+      recoverable: false,
+    };
   }
   if (!bin) {
-    return { event: "remix-error", sessionId: id, message: "sysrec バイナリが見つかりません" };
+    // バイナリを用意すれば救えるので復旧待ちには残す。
+    return {
+      event: "remix-error",
+      sessionId: id,
+      message: "sysrec バイナリが見つかりません",
+      recoverable: true,
+    };
   }
 
   const outcome = await mixOrRescue(ctx, bin, out, agc, id);
@@ -232,14 +248,16 @@ export async function remix(ctx: RecorderContext, opts: RemixOptions): Promise<T
       return {
         event: "remix-error",
         sessionId: id,
-        message: "mix に失敗しました（中間ファイルは保持しています）",
+        message: "音声の結合に失敗しました（元の音声は残しています）",
         parts: { system: outcome.sys, mic: outcome.mic },
+        recoverable: true,
       };
     case "no-data":
       return {
         event: "remix-error",
         sessionId: id,
-        message: "中間ファイルがありません（復旧できません）",
+        message: "元になる音声が残っていません",
+        recoverable: false,
       };
   }
 }

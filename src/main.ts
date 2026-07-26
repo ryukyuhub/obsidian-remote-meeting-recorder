@@ -15,16 +15,24 @@ import { createContext, getVaultBasePath, type RecorderContext } from "./context
 import { DoctorModal } from "./ui/DoctorModal";
 import { StatusBarController } from "./ui/statusBar";
 import { RecordingView, RECORDING_VIEW_TYPE } from "./ui/RecordingView";
-import type { RecorderSource, SessionMeta, StartOptions, TerminalEvent } from "./types";
+import type {
+  PendingRecovery,
+  RecorderSource,
+  SessionMeta,
+  StartOptions,
+  TerminalEvent,
+} from "./types";
 import { StartError, type StartResult } from "./recorder/start";
 import { createRecorderBackend, type RecorderBackend } from "./recorder/backend";
 import { remix } from "./recorder/mix";
-import { restoreInProgressSessions } from "./recorder/restore";
+import { restoreInProgressSessions, toPendingRecovery } from "./recorder/restore";
+import { describePendingRecovery, pickPendingRecovery } from "./ui/RecoveryPicker";
 import { SessionWatcher } from "./recorder/watch";
 import { insertEmbed, computeVaultRelative } from "./ui/embed";
 import type { MicDevice } from "./recorder/devices";
 import { linkToDailyNote } from "./ui/dailyNote";
-import { rotateLogs } from "./state/sessionStore";
+import { readSessionMeta, rotateLogs } from "./state/sessionStore";
+import { sessionPaths } from "./state/paths";
 import { ControlWindowManager } from "./ui/controlWindow";
 import { runTranscription } from "./transcribe/runTranscription";
 import { transcribeFile, transcribeAudioFile, transcribeEmbed } from "./transcribe/orchestrate";
@@ -90,7 +98,9 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
   private handledTerminals = new Set<string>();
   // 開いている録音ビュー（split 等で複数あり得るので Set で全件に通知する）
   private recordingViews = new Set<RecordingView>();
-  private lastWarningSessionId: string | null = null;
+  // 復旧待ち（保存が完了しなかった録音）。単一スロットだと 2 件目以降が
+  // UI から永久に辿れなくなるため全件保持する（Issue #6）。
+  private pendingRecoveries: PendingRecovery[] = [];
   private finalizedCallbacks: Array<(ev: TerminalEvent) => void> = [];
 
   // 録音バックエンド（macOS=sysrec / Windows=WebRecorder）。platform 分岐はここに集約（§R3）。
@@ -143,9 +153,10 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
       callback: () => void this.stopViaCommand(),
     });
     this.addCommand({
+      // id は既存ホットキー互換のため据え置き（表示名だけ平易にした）。
       id: "remix-last-failed",
-      name: "失敗した録音を remix 復旧",
-      callback: () => void this.remixLastFailed(),
+      name: "保存が完了しなかった録音を復旧",
+      callback: () => void this.recoverRecording(),
     });
     this.addCommand({
       id: "transcribe-file",
@@ -445,7 +456,10 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
     if (this.handledTerminals.has(sessionId)) return;
     this.handledTerminals.add(sessionId);
 
-    this.watchers.get(sessionId)?.stop();
+    // meta は watcher を捨てる前に控える（復旧待ちの表示情報を組み立てるのに要る）。
+    const watcher = this.watchers.get(sessionId);
+    const meta = watcher?.meta ?? null;
+    watcher?.stop();
     this.watchers.delete(sessionId);
 
     const wasActive = this.activeRecording?.sessionId === sessionId;
@@ -458,19 +472,25 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
     switch (ev.event) {
       case "stopped":
       case "remixed":
-        this.finalizeSaved(ev, sessionId, wasActive);
+        this.removePendingRecovery(sessionId);
+        this.finalizeSaved(ev, sessionId);
         break;
       case "stop-warning":
-        this.lastWarningSessionId = sessionId;
-        if (wasActive) this.statusBar.setWarning();
-        new Notice(
-          `⚠ ${ev.message ?? "mix に失敗しました"}\n「失敗した録音を remix 復旧」で復旧できます。`,
-          NOTICE_LONG_MS
-        );
+        if (ev.recoverable === false) {
+          // 素材が無いので復旧のしようがない。原因だけ伝えて警告は残さない。
+          new Notice(`⚠ ${ev.message ?? "録音を保存できませんでした"}`, NOTICE_LONG_MS);
+        } else {
+          // 音声は中間ファイルに残っている。用語ではなく「何が起きて何ができるか」を伝える。
+          this.addPendingRecovery(sessionId, meta);
+          this.notifyRecoveryNeeded(
+            "録音の保存が最後まで終わりませんでした。音声は残っているので復旧できます。"
+          );
+        }
         break;
       case "remix-error":
-        this.lastWarningSessionId = sessionId;
-        new Notice(`⚠ remix に失敗しました: ${ev.message ?? ""}`, NOTICE_LONG_MS);
+        if (ev.recoverable === false) this.removePendingRecovery(sessionId);
+        else this.addPendingRecovery(sessionId, meta);
+        new Notice(`⚠ 復旧できませんでした: ${ev.message ?? ""}`, NOTICE_LONG_MS);
         break;
       case "stop-error":
         new Notice(`停止に失敗しました: ${ev.message ?? ""}`, NOTICE_ERROR_MS);
@@ -486,8 +506,7 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
   }
 
   /** 保存成功（stopped/remixed）: 埋め込み・外部フック・自動文字起こし。 */
-  private finalizeSaved(ev: TerminalEvent, sessionId: string, wasActive: boolean): void {
-    if (wasActive) this.statusBar.clear();
+  private finalizeSaved(ev: TerminalEvent, sessionId: string): void {
     new Notice(`録音を保存しました${ev.durationSec ? `（${ev.durationSec}秒）` : ""}`);
     // 埋め込み先ノートは maybeInsertEmbed が消費するので先に控える（文字起こしの追記先）
     const embedTarget = this.embedTargets.get(sessionId) ?? null;
@@ -596,21 +615,83 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
   }
 
   // ================================================================
-  // remix 復旧
+  // 復旧（保存が完了しなかった録音の mix やり直し）
   // ================================================================
-  async remixLastFailed(): Promise<void> {
-    const id = this.lastWarningSessionId;
-    if (!id) {
-      new Notice("復旧対象の録音が見つかりません。");
+  /** 録音ビュー・ステータスバーが読む復旧待ち一覧。 */
+  getPendingRecoveries(): readonly PendingRecovery[] {
+    return this.pendingRecoveries;
+  }
+
+  /** 復旧待ちに追加（同一セッションは上書き）。表示情報は meta から組み立てる。 */
+  private addPendingRecovery(sessionId: string, meta: SessionMeta | null): void {
+    const ctx = this.buildContext();
+    const resolved = meta ?? readSessionMeta(sessionPaths(ctx.paths, sessionId).json);
+    if (!resolved) return;
+    this.pendingRecoveries = this.pendingRecoveries.filter((p) => p.sessionId !== sessionId);
+    this.pendingRecoveries.push(toPendingRecovery(ctx, resolved));
+    this.refreshRecoveryUi();
+  }
+
+  private removePendingRecovery(sessionId: string): void {
+    const before = this.pendingRecoveries.length;
+    this.pendingRecoveries = this.pendingRecoveries.filter((p) => p.sessionId !== sessionId);
+    if (this.pendingRecoveries.length !== before) this.refreshRecoveryUi();
+  }
+
+  /** ステータスバーと録音ビューへ復旧待ちの件数を反映。 */
+  private refreshRecoveryUi(): void {
+    if (this.pendingRecoveries.length > 0) {
+      this.statusBar.setWarning(this.pendingRecoveries.length);
+    } else {
+      this.statusBar.clear();
+    }
+    for (const v of this.recordingViews) v.refresh();
+  }
+
+  /**
+   * 復旧を促す Notice。コマンド名を覚えていなくても押すだけで復旧できるよう
+   * ボタンを埋め込む（Issue #6）。対象がどの録音かも明示する。
+   */
+  private notifyRecoveryNeeded(message: string): void {
+    const pending = [...this.pendingRecoveries];
+    const notice = new Notice(
+      createFragment((frag) => {
+        frag.createDiv({ text: `⚠ ${message}` });
+        for (const p of pending) {
+          frag.createDiv({ cls: "rmr-notice-item", text: describePendingRecovery(p) });
+        }
+        const btn = frag.createEl("button", { cls: "rmr-notice-action", text: "録音を復旧する" });
+        btn.addEventListener("click", () => {
+          notice.hide();
+          void this.recoverRecording();
+        });
+      }),
+      NOTICE_LONG_MS
+    );
+  }
+
+  /**
+   * 保存が完了しなかった録音を復旧する（中間ファイルから mix をやり直す）。
+   * sessionId 省略時は、1 件なら即実行・複数ならどれを復旧するか選ばせる。
+   */
+  async recoverRecording(sessionId?: string): Promise<void> {
+    if (this.pendingRecoveries.length === 0) {
+      new Notice("復旧が必要な録音はありません。");
       return;
     }
-    new Notice("remix を実行中…");
+    let target = sessionId
+      ? this.pendingRecoveries.find((p) => p.sessionId === sessionId)
+      : this.pendingRecoveries.length === 1
+        ? this.pendingRecoveries[0]
+        : ((await pickPendingRecovery(this.app, [...this.pendingRecoveries])) ?? undefined);
+    if (!target) return;
+
+    new Notice(`復旧しています…（${describePendingRecovery(target)}）`);
     const ctx = this.buildContext();
-    // handled 済みでも remix はやり直せるよう解除
-    this.handledTerminals.delete(id);
-    const ev = await remix(ctx, { sessionId: id });
-    if (ev.event === "remixed") this.lastWarningSessionId = null;
-    this.handleTerminal(ev, id);
+    // handled 済みでも復旧はやり直せるよう解除
+    this.handledTerminals.delete(target.sessionId);
+    const ev = await remix(ctx, { sessionId: target.sessionId });
+    this.handleTerminal(ev, target.sessionId);
   }
 
   // ================================================================
@@ -647,14 +728,14 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
       this.maybeOpenControlWindow();
     }
 
+    // 復旧待ちは全件保持する（1 件だけ覚えると 2 件目以降が UI から辿れない）。
     for (const meta of result.needsRemix) {
-      this.lastWarningSessionId = meta.id;
+      this.addPendingRecovery(meta.id, meta);
     }
     if (result.needsRemix.length > 0) {
-      new Notice(
-        `⚠ 前回異常終了した録音が ${result.needsRemix.length} 件あります。` +
-          `「失敗した録音を remix 復旧」で復旧できます。`,
-        10000
+      this.notifyRecoveryNeeded(
+        `前回、保存が最後まで終わらなかった録音が ${result.needsRemix.length} 件あります。` +
+          "音声は残っているので復旧できます。"
       );
     }
 

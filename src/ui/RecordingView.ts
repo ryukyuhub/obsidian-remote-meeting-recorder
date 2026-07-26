@@ -5,6 +5,7 @@ import type { MicDevice } from "../recorder/devices";
 import { WaveformRenderer } from "../audio/waveform";
 import { defaultFilename, formatElapsed } from "../util/time";
 import { pickMarkdownNote } from "./NotePicker";
+import { describePendingRecovery } from "./RecoveryPicker";
 import {
   resolveWhisperModel,
   DEFAULT_WHISPER_MODEL,
@@ -143,6 +144,9 @@ export class RecordingView extends ItemView {
 
     const active = this.plugin.activeRecording;
 
+    // --- 復旧バナー（保存が完了しなかった録音がある間ずっと出す） ---
+    this.buildRecoveryBanner(root);
+
     // --- タイトル ---
     const titleRow = root.createDiv({ cls: "rmr-title-row" });
     if (active) {
@@ -196,6 +200,35 @@ export class RecordingView extends ItemView {
           ? "⚠ ノート PC の蓋を閉じる／スリープすると録音は止まります"
           : "⚠ MacBook の蓋を閉じる／スリープすると録音は止まります",
     });
+  }
+
+  /**
+   * 保存が完了しなかった録音の復旧バナー（Issue #6）。Notice は数秒で消えてしまい
+   * 手がかりが残らないため、復旧するまでここに出し続ける。1 件ごとにボタンを置く。
+   */
+  private buildRecoveryBanner(root: HTMLElement): void {
+    const pending = this.plugin.getPendingRecoveries();
+    if (pending.length === 0) return;
+
+    const banner = root.createDiv({ cls: "rmr-recovery" });
+    banner.createDiv({
+      cls: "rmr-recovery-title",
+      text: `⚠ 保存が完了しなかった録音が ${pending.length} 件あります`,
+    });
+    banner.createDiv({
+      cls: "rmr-recovery-desc",
+      text: "音声そのものは残っています。復旧すると 1 本の録音ファイルにまとめ直します。",
+    });
+    for (const p of pending) {
+      const row = banner.createDiv({ cls: "rmr-recovery-row" });
+      row.createSpan({ cls: "rmr-recovery-name", text: describePendingRecovery(p) });
+      const btn = row.createEl("button", { cls: "rmr-recovery-btn", text: "復旧" });
+      btn.addEventListener("click", () => {
+        btn.disabled = true;
+        btn.setText("復旧中…");
+        void this.plugin.recoverRecording(p.sessionId);
+      });
+    }
   }
 
   /** 現在の source で表示すべきメーターのソース列（both=2本、単体=1本）。 */

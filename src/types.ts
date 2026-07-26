@@ -43,6 +43,20 @@ export interface StartOptions {
   micGainDb?: number;
 }
 
+/**
+ * 保存が最後まで完了しなかった録音（復旧待ち）。中間ファイルが残っているので
+ * mix をやり直せば救える。UI 表示に必要な情報を SessionMeta から組み立てたもの。
+ */
+export interface PendingRecovery {
+  sessionId: string;
+  /** 表示名（録音時のラベル。無ければ出力ファイル名） */
+  label: string;
+  /** 録音開始時刻（epoch ミリ秒） */
+  startedAt: number;
+  /** 録音の長さ（秒）。status ファイルから取れなければ undefined */
+  durationSec?: number;
+}
+
 /** 終端イベントの語彙（設計書 §5.4）。UI はこれを解釈して反応する。 */
 export type TerminalEventKind =
   | "stopped"
@@ -62,6 +76,11 @@ export interface TerminalEvent {
   bytes?: number;
   /** 警告・エラー時の説明（ログ tail 等） */
   message?: string;
+  /**
+   * remix-error のとき、再試行で救える見込みがあるか。
+   * false（中間ファイルが無い等）なら復旧待ちから外して警告を残さない。
+   */
+  recoverable?: boolean;
   /** both の中間ファイル（stop-warning 時に温存されているもの） */
   parts?: { system?: string; mic?: string };
 }

@@ -18,9 +18,9 @@ export class StatusBarController {
     this.onClick = handler;
   }
 
-  /** mix 失敗（remix 待ち）表示。 */
-  setWarning(): void {
-    this.el.setText("⚠ remix needed");
+  /** 保存が完了していない録音がある旨の表示（クリックで録音ビューへ）。 */
+  setWarning(count: number): void {
+    this.el.setText(`⚠ 未保存の録音 ${count} 件`);
     this.el.addClass("rmr-statusbar-warning");
     this.el.removeClass("rmr-hidden");
   }

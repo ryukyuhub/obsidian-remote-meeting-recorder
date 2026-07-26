@@ -992,7 +992,7 @@ func runMix(_ argv: [String]) -> Never {
     ]
     do {
         let outFile = try AVAudioFile(forWriting: outURL, settings: outSettings)
-        try outFile.write(from: writeBuf)
+        try writeInChunks(outFile, writeBuf)
     } catch { die(4, "mix: 書き出し失敗: \(error)") }
 
     let outAttrs = try? FileManager.default.attributesOfItem(atPath: out)
@@ -1067,7 +1067,7 @@ func runNormalize(_ argv: [String]) -> Never {
     ]
     do {
         let outFile = try AVAudioFile(forWriting: outURL, settings: outSettings)
-        try outFile.write(from: buf)
+        try writeInChunks(outFile, buf)
     } catch { die(4, "normalize: 書き出し失敗: \(error)") }
 
     let bytes = ((try? FileManager.default.attributesOfItem(atPath: out))?[.size] as? Int64) ?? 0

@@ -191,6 +191,51 @@
   font-size: 0.85em;
 }
 
+/* --- 復旧バナー（保存が完了しなかった録音）--- */
+.rmr-recovery {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--color-orange);
+  border-radius: var(--radius-s);
+  background-color: var(--background-secondary);
+}
+.rmr-recovery-title {
+  color: var(--color-orange);
+  font-weight: var(--font-semibold);
+}
+.rmr-recovery-desc {
+  color: var(--text-muted);
+  font-size: 0.85em;
+}
+.rmr-recovery-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap; /* 狭いサイドバーでも名前とボタンが潰れないように */
+}
+.rmr-recovery-name {
+  flex: 1;
+  font-size: 0.9em;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.rmr-recovery-btn {
+  flex-shrink: 0;
+  cursor: pointer;
+}
+/* 復旧を促す Notice（本文＋対象＋ボタン） */
+.rmr-notice-item {
+  font-size: 0.9em;
+  opacity: 0.85;
+  padding-top: 2px;
+}
+.rmr-notice-action {
+  margin-top: 8px;
+  cursor: pointer;
+}
+
 .rmr-settings-note {
   color: var(--text-muted);
   font-size: 0.85em;

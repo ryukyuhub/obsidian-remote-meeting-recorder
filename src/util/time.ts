@@ -23,6 +23,21 @@ export function defaultFilename(d: Date = new Date()): string {
   return `${formatDate(d)}-${pad2(d.getHours())}${pad2(d.getMinutes())}`;
 }
 
+/** ローカル日時 `YYYY-MM-DD HH:MM`（復旧待ち録音の表示用）。 */
+export function formatDateTime(d: Date): string {
+  return `${formatDate(d)} ${formatClock(d)}`;
+}
+
+/** 録音の長さを日本語で（例「1時間13分」「45秒」）。復旧待ち録音の表示用。 */
+export function formatDuration(totalSec: number): string {
+  const s = Math.max(0, Math.round(totalSec));
+  if (s < 60) return `${s}秒`;
+  const h = Math.floor(s / 3600);
+  const m = Math.round((s % 3600) / 60);
+  if (h > 0) return m > 0 ? `${h}時間${m}分` : `${h}時間`;
+  return `${m}分`;
+}
+
 /** 経過秒を `M:SS` / `H:MM:SS` に整形（status bar 用）。 */
 export function formatElapsed(totalSec: number): string {
   const s = Math.max(0, Math.floor(totalSec));

@@ -18,7 +18,7 @@ export function statusHasStopped(statusPath: string): boolean {
 }
 
 /** stopped 行から durationSec を取り出す（表示用・失敗は致命でない）。 */
-function parseDurationSec(statusPath: string): number | undefined {
+export function parseDurationSec(statusPath: string): number | undefined {
   try {
     const lines = fs.readFileSync(statusPath, "utf8").trim().split(/\r?\n/).reverse();
     for (const line of lines) {
@@ -94,8 +94,9 @@ async function doFinalize(ctx: RecorderContext, meta: SessionMeta): Promise<Term
           event: "stop-warning",
           sessionId: meta.id,
           source: "both",
-          message: "mix に失敗しました。remix で復旧できます（中間ファイルは保持）。",
+          message: "システム音とマイクの結合に失敗しました（元の音声は残しています）。",
           parts: { system: outcome.sys, mic: outcome.mic },
+          recoverable: true,
         };
       case "no-data":
         finalizeCleanup(ctx.paths, meta.id);
@@ -104,6 +105,7 @@ async function doFinalize(ctx: RecorderContext, meta: SessionMeta): Promise<Term
           sessionId: meta.id,
           source: "both",
           message: "録音データがありません（マイク権限やデバイスを確認してください）。",
+          recoverable: false,
         };
     }
   }
@@ -125,5 +127,6 @@ async function doFinalize(ctx: RecorderContext, meta: SessionMeta): Promise<Term
     sessionId: meta.id,
     source: meta.source,
     message: "録音ファイルが生成されませんでした。",
+    recoverable: false,
   };
 }

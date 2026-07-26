@@ -37,5 +37,6 @@ export async function stopWebRecording(
     source: meta?.source,
     message:
       "録音データがありませんでした（マイクの許可、またはシステム音声の共有を確認してください）。",
+    recoverable: false,
   };
 }
