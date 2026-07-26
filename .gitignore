@@ -13,6 +13,8 @@ build/
 native/sysrec/sysrec
 native/sysrec/*.o
 native/sysrec/build/
+# 版数は build.sh が manifest.json から生成する（コミットしない）
+native/sysrec/Version.generated.swift
 # DRM対策 Spike のビルド成果物（ソース tap.swift/micsck.swift のみ追跡）
 native/sysrec/spike/tap
 native/sysrec/spike/micsck

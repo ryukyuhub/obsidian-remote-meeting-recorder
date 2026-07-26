@@ -65,7 +65,9 @@ final class Emitter {
 /// **CLI 契約を壊す変更を入れたらここを上げる**（新引数の追加だけなら据え置きでよい）。
 /// abi 2 = タップ方式のシステム音取り込み＋control/level ファイル＋normalize サブコマンド。
 let sysrecAbi = 2
-let sysrecVersion = "0.8.0"
+// sysrecVersion は build.sh が manifest.json から Version.generated.swift へ書き出す。
+// 手書き定数だと更新を忘れる（0.9.0・0.10.0 と 2 回続けて 0.8.0 のまま出荷し、
+// 「sysrec を取得」で入れ替えても版数が変わらず更新できたか判別できなかった）。
 
 
 func logErr(_ s: String) { FileHandle.standardError.write(Data((s + "\n").utf8)) }
