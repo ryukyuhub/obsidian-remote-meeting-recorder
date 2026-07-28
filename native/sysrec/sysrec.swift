@@ -384,6 +384,10 @@ final class TapCapturer {
     private var tapID = AudioObjectID(kAudioObjectUnknown)
     private var aggID = AudioObjectID(kAudioObjectUnknown)
     private var ioProc: AudioDeviceIOProcID?
+    /// タップが報告する形式。チャンネル数・フラグは使うが、**サンプルレートは信用しない**
+    /// （実デバイスのレートと食い違う。理由は buildAggregate の注記）。
+    private var tapFormat: AVAudioFormat?
+    /// IOProc が実際に渡してくる形式（tapFormat のレートを集約デバイスの公称レートへ差し替えたもの）。
     private var srcFormat: AVAudioFormat?
     private var tapUUID = ""
     private var currentOutUID = ""
@@ -395,6 +399,17 @@ final class TapCapturer {
     private var listenerBlock: AudioObjectPropertyListenerBlock?
     private var listenerAddr = AudioObjectPropertyAddress(
         mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+        mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+    /// 同一デバイスのままレートだけが変わる場合の監視（BT の A2DP 44.1kHz ⇄ HFP 16kHz など）。
+    /// 既定出力デバイスの「変更」イベントは飛ばないので、これがないと追従できない。
+    /// 登録/解除は再構築のたびに起きる（＝rebuildQueue 上で解除する）ため、配送キューは
+    /// rebuildQueue と**別**にする。同一キューだと解除が自キューの完了待ちになった場合に
+    /// 録音中デッドロックし得る。ブロック内で rebuildQueue へ渡し直して直列性は保つ。
+    private let rateQueue = DispatchQueue(label: "sysrec.tap.rate")
+    private var rateListenerBlock: AudioObjectPropertyListenerBlock?
+    private var rateListenerDevice = AudioObjectID(kAudioObjectUnknown)
+    private var rateAddr = AudioObjectPropertyAddress(
+        mSelector: kAudioDevicePropertyNominalSampleRate,
         mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
 
     init(onBuffer: @escaping (AVAudioPCMBuffer, UInt64) -> Void) { self.onBuffer = onBuffer }
@@ -443,8 +458,8 @@ final class TapCapturer {
         AudioObjectAddPropertyListenerBlock(sys, &listenerAddr, rebuildQueue, block)
     }
 
-    /// タップの現フォーマットを読み直す（出力デバイスが変わるとサンプルレートが変わり得る:
-    /// 例 BT 44.1kHz ⇔ 内蔵 48kHz。下流の FormatNormalizer はフォーマット変化を見て作り直す）。
+    /// タップの現フォーマット（チャンネル数・サンプル形式）を読み直す。
+    /// サンプルレートは buildAggregate で集約デバイスの実レートへ差し替える。
     private func refreshTapFormat() throws {
         var asbd = AudioStreamBasicDescription()
         var asz = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
@@ -455,7 +470,20 @@ final class TapCapturer {
               let fmt = AVAudioFormat(streamDescription: &asbd) else {
             throw CaptureError.msg("タップの音声フォーマットを取得できませんでした。")
         }
+        tapFormat = fmt
         srcFormat = fmt
+    }
+
+    /// デバイスの公称サンプルレート。
+    private static func nominalSampleRate(_ device: AudioObjectID) -> Double? {
+        guard device != 0 else { return nil }
+        var sr = 0.0
+        var sz = UInt32(MemoryLayout<Double>.size)
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyNominalSampleRate,
+            mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        guard AudioObjectGetPropertyData(device, &addr, 0, nil, &sz, &sr) == noErr, sr > 0 else { return nil }
+        return sr
     }
 
     /// 集約デバイス＋IOProc を outUID にぶら下げて構築・開始する（start と再構築の共通部）。
@@ -476,14 +504,28 @@ final class TapCapturer {
             throw CaptureError.msg("集約デバイスを作成できませんでした。")
         }
 
+        // **取り込みレートはタップではなく集約デバイスに聞く。**
+        // タップの報告（kAudioTapPropertyFormat）は 48000Hz 固定で返ってくることがあり、
+        // IOProc に実際に流れてくるのは集約デバイス＝出力デバイスのレート（BT A2DP なら
+        // 44100Hz、HFP 通話モードなら 16000Hz）。48000Hz と誤ってラベルすると下流は
+        // 1 − 44100/48000 = 8.1% ぶん実時刻に追いつけず、CaptureLane が 0.25 秒ごとに
+        // 無音を挿入する。結果は「8.8% 速い＋1秒に4回プツプツ切れる」録音になる（実測・0.11.0）。
+        srcFormat = TapCapturer.formatWithDeviceRate(tapFormat, device: aggID)
+        guard let fmt = srcFormat else {
+            AudioHardwareDestroyAggregateDevice(aggID); aggID = 0
+            throw CaptureError.msg("タップの音声フォーマットを取得できませんでした。")
+        }
+        // フレーム数はフォーマットの bytesPerFrame で数える（ラベルと数え方を必ず一致させる）。
+        let bytesPerFrame = max(1, Int(fmt.streamDescription.pointee.mBytesPerFrame))
+
         // リアルタイムスレッド。ここでは ABL をコピーして渡すだけに留める
         // （変換・書き出しまでやると 10.67ms のバッファ周期を超えて IO 周期が落ちる）。
+        // fmt は block 生成時に確定させる（RT スレッドから可変プロパティを読まない）。
         let block: AudioDeviceIOBlock = { [weak self] _, inInputData, inInputTime, _, _ in
-            guard let self, let fmt = self.srcFormat else { return }
+            guard let self else { return }
             let abl = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inInputData))
             guard abl.count >= 1, abl[0].mData != nil else { return }
-            let ch = max(1, Int(abl[0].mNumberChannels))
-            let frames = AVAudioFrameCount(Int(abl[0].mDataByteSize) / (MemoryLayout<Float>.size * ch))
+            let frames = AVAudioFrameCount(Int(abl[0].mDataByteSize) / bytesPerFrame)
             guard frames > 0, let pcm = copyToPCMBuffer(abl, format: fmt, frames: frames) else { return }
             self.onBuffer(pcm, captureHostTime(inInputTime))
         }
@@ -497,10 +539,42 @@ final class TapCapturer {
             throw CaptureError.msg("システム音声タップを開始できませんでした。")
         }
         currentOutUID = outUID
+        startRateListener(outUID)
+    }
+
+    /// タップ報告のフォーマットに、実デバイスの公称レートを被せて返す（チャンネル数・フラグは維持）。
+    private static func formatWithDeviceRate(_ base: AVAudioFormat?, device: AudioObjectID) -> AVAudioFormat? {
+        guard let base else { return nil }
+        guard let sr = nominalSampleRate(device), abs(sr - base.sampleRate) >= 1 else { return base }
+        var asbd = base.streamDescription.pointee
+        asbd.mSampleRate = sr
+        guard let fmt = AVAudioFormat(streamDescription: &asbd) else { return base }
+        logErr("システム音: 取り込みレートをデバイス実測へ補正（タップ報告 \(Int(base.sampleRate))Hz → 実 \(Int(sr))Hz）")
+        return fmt
+    }
+
+    /// 出力デバイスのレート変化を監視する（同一デバイスのまま A2DP 44.1kHz ⇄ HFP 16kHz が起きる）。
+    private func startRateListener(_ outUID: String) {
+        guard let devID = audioDeviceID(forUID: outUID) else { return }
+        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            guard let self else { return }
+            self.rebuildQueue.async { self.scheduleRebuild() }
+        }
+        guard AudioObjectAddPropertyListenerBlock(devID, &rateAddr, rateQueue, block) == noErr else { return }
+        rateListenerBlock = block
+        rateListenerDevice = devID
+    }
+
+    private func stopRateListener() {
+        guard let block = rateListenerBlock, rateListenerDevice != 0 else { return }
+        AudioObjectRemovePropertyListenerBlock(rateListenerDevice, &rateAddr, rateQueue, block)
+        rateListenerBlock = nil
+        rateListenerDevice = AudioObjectID(kAudioObjectUnknown)
     }
 
     /// 集約デバイス側だけ畳む（タップは生かす・再構築用）。
     private func teardownAggregate() {
+        stopRateListener()
         if let proc = ioProc {
             AudioDeviceStop(aggID, proc)
             AudioDeviceDestroyIOProcID(aggID, proc)
@@ -529,11 +603,19 @@ final class TapCapturer {
             return
         }
         let oldUID = currentOutUID
+        let oldRate = srcFormat?.sampleRate ?? 0
+        // デバイスもレートも変わっていなければ何もしない（再構築は数百 ms 音が欠けるため、
+        // 空振りのプロパティ通知で切らない）。どちらか一方でも不明／相違なら作り直す。
+        let devRate = audioDeviceID(forUID: newUID).flatMap { TapCapturer.nominalSampleRate($0) }
+        let aggRate = TapCapturer.nominalSampleRate(aggID)
+        if newUID == oldUID, let d = devRate, let a = aggRate,
+           abs(d - oldRate) < 1, abs(a - oldRate) < 1 { return }
         teardownAggregate()
         do {
             try refreshTapFormat()
             try buildAggregate(newUID)
-            logErr("システム音: 出力デバイス変更に追従して再接続（\(oldUID) → \(newUID)）")
+            let newRate = Int(srcFormat?.sampleRate ?? 0)
+            logErr("システム音: 出力の変更に追従して再接続（\(oldUID) \(Int(oldRate))Hz → \(newUID) \(newRate)Hz）")
         } catch {
             logErr("システム音: 再接続に失敗（\(error)）。1秒後に再試行します")
             if !isRetry {
@@ -577,9 +659,19 @@ final class TapCapturer {
 }
 
 /// マイクを取得して onBuffer に native PCM を渡す。
-/// - 既定入力（--mic-device なし）… AVAudioEngine の inputNode をタップ（安定・従来どおり）。
+/// - 既定入力（--mic-device なし）… その既定入力デバイスへ CoreAudio IOProc を張る。
+///   取れなければ AVAudioEngine の inputNode タップへフォールバック。
 /// - 特定デバイス指定 … その入力デバイスを「一時的にシステム既定入力へ切替」えてから
 ///   CoreAudio IOProc を張って取得し、停止時に元の既定入力へ復元する。
+///
+/// なぜ既定入力でも AVAudioEngine を第一候補にしないのか（実機で確定・2026-07-28）:
+///   既定入力が Bluetooth イヤホンだと、AVAudioEngine 経路は `engine.start()` が成功するのに
+///   **バッファが 1 つも流れてこない**（マイクを開いた瞬間に HFP へ切り替わり、inputNode が
+///   握ったフォーマットと実デバイスが食い違うため）。同じデバイスでも IOProc 経路なら録れる
+///   ことを実測で確認した（0 フレーム vs 287325 フレーム）。会議を丸ごと無音で録ってしまう
+///   事故（2026-07-28 19:17 の mic=0 フレーム）の正体がこれ。
+///   Issue #1 の「非既定デバイスへ IOProc を張ると Obsidian 文脈で固まる」条件には、
+///   対象が既定入力そのものなので当たらない。
 ///
 /// なぜ既定入力へ切替えるのか（Issue #1・実機検証で確定）:
 ///   - AVAudioEngine の kAudioOutputUnitProperty_CurrentDevice でデバイスを差し替える方式は、
@@ -599,9 +691,24 @@ final class MicCapturer {
     private var deviceFormat: AVAudioFormat?
     // 一時的に既定入力を切替えた場合の復元先（nil＝切替えていない）
     private var savedDefaultInput: AudioDeviceID?
+    /// 開始からこの時間で 1 バッファも来なければ、取得経路を切り替える（無音録音への防御）。
+    private static let watchdogSec = 3.0
+    private let stateLock = NSLock()
+    private var gotBuffer = false
+    private var stopped = false
+    private var switched = false // 経路の切替は 1 回だけ
+    /// 取得経路の張り替え／停止を直列化する（watchdog と stop の競合を防ぐ）。
+    private let opLock = NSLock()
     init(onBuffer: @escaping (AVAudioPCMBuffer, UInt64) -> Void) { self.onBuffer = onBuffer }
 
+    /// 取得経路から届いたバッファを上位へ渡す（到達を watchdog 用に記録する）。
+    private func deliver(_ pcm: AVAudioPCMBuffer, _ hostTime: UInt64) {
+        stateLock.lock(); gotBuffer = true; stateLock.unlock()
+        onBuffer(pcm, hostTime)
+    }
+
     func start(micDevice: String?) throws {
+        opLock.lock(); defer { opLock.unlock() } // 開始中に watchdog が経路を張り替えないように
         // 特定マイク指定があり解決できたら、対象を一時的に既定入力へ切替えてから IOProc で取得する。
         if let uid = micDevice, let devID = audioDeviceID(forUID: uid) {
             // 非既定デバイスは Obsidian 文脈で起動時に固まるため、録音の間だけ既定入力を対象へ切替える。
@@ -616,6 +723,7 @@ final class MicCapturer {
             }
             do {
                 try startDeviceProc(devID)
+                armWatchdog()
                 return
             } catch CaptureError.msg(let m) {
                 // 対象デバイスで開始できなかった → 既定入力を戻し、録音自体は失わないよう既定入力で録る。
@@ -625,7 +733,60 @@ final class MicCapturer {
         } else if micDevice != nil {
             logErr("マイク: 指定 UID を解決できませんでした（既定入力を使用）: \(micDevice ?? "")")
         }
+        try startDefaultInput()
+        armWatchdog()
+    }
+
+    /// 既定入力を取得する。IOProc（＝特定デバイス指定と同じ経路）を優先し、失敗時のみ
+    /// AVAudioEngine へ落とす。優先順位の理由はクラスの注記を参照。
+    private func startDefaultInput() throws {
+        let devID = currentDefaultInputDevice()
+        if devID != AudioObjectID(kAudioObjectUnknown) {
+            do {
+                try startDeviceProc(devID)
+                return
+            } catch CaptureError.msg(let m) {
+                logErr("マイク: 既定入力を IOProc で取得できず AVAudioEngine へフォールバック: \(m)")
+            }
+        }
         try startEngineDefault()
+    }
+
+    /// 開始後 watchdogSec 経っても 1 バッファも来ていなければ、もう一方の経路へ 1 回だけ張り替える。
+    /// 「engine.start() は成功しているのに無音」を録り切ってしまわないための保険。
+    private func armWatchdog() {
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + Self.watchdogSec) { [weak self] in
+            self?.switchPathIfSilent()
+        }
+    }
+
+    private func switchPathIfSilent() {
+        // ロック順は常に opLock → stateLock（start/stop と同じ）。判定は opLock を取ってから行う
+        // ＝開始処理が長引いている最中に「まだ来ていない」と誤判定して張り替えないため。
+        opLock.lock(); defer { opLock.unlock() }
+        stateLock.lock()
+        let needSwitch = !gotBuffer && !stopped && !switched
+        if needSwitch { switched = true }
+        stateLock.unlock()
+        guard needSwitch else { return }
+
+        let wasEngine = installed
+        logErr("⚠ マイク: \(Int(Self.watchdogSec))秒間 1 バッファも取得できませんでした。"
+            + "取得経路を切り替えます（\(wasEngine ? "AVAudioEngine → IOProc" : "IOProc → AVAudioEngine")）")
+        teardownCapture()
+        do {
+            if wasEngine {
+                let devID = currentDefaultInputDevice()
+                guard devID != AudioObjectID(kAudioObjectUnknown) else {
+                    throw CaptureError.msg("既定入力デバイスを取得できませんでした。")
+                }
+                try startDeviceProc(devID)
+            } else {
+                try startEngineDefault()
+            }
+        } catch {
+            logErr("⚠ マイク: 取得経路の切り替えにも失敗しました（マイクは録れていません）: \(error)")
+        }
     }
 
     /// 一時切替した既定入力を元へ戻す（多重呼び出し安全）。
@@ -644,7 +805,7 @@ final class MicCapturer {
             throw CaptureError.msg("マイク入力フォーマットが不正です（入力デバイスを確認してください）。")
         }
         input.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buf, when in
-            self?.onBuffer(buf, when.hostTime != 0 ? when.hostTime : mach_absolute_time())
+            self?.deliver(buf, when.hostTime != 0 ? when.hostTime : mach_absolute_time())
         }
         installed = true
         engine.prepare()
@@ -669,7 +830,7 @@ final class MicCapturer {
             guard abl.count >= 1, abl[0].mData != nil else { return }
             let frames = AVAudioFrameCount(Int(abl[0].mDataByteSize) / bytesPerFrame)
             guard frames > 0, let pcm = copyToPCMBuffer(abl, format: fmt, frames: frames) else { return }
-            self.onBuffer(pcm, captureHostTime(inInputTime))
+            self.deliver(pcm, captureHostTime(inInputTime))
         }
         var proc: AudioDeviceIOProcID?
         let cst = AudioDeviceCreateIOProcIDWithBlock(&proc, devID, nil, block)
@@ -684,7 +845,8 @@ final class MicCapturer {
         ioProc = p; procDeviceID = devID
     }
 
-    func stop() {
+    /// 取得経路だけ畳む（既定入力の復元はしない＝経路の張り替えと stop の共通部）。
+    private func teardownCapture() {
         // IOProc 経路（停止 → Destroy の順）。
         if let p = ioProc {
             AudioDeviceStop(procDeviceID, p)
@@ -694,9 +856,29 @@ final class MicCapturer {
         // AVAudioEngine 経路。
         if installed { engine.inputNode.removeTap(onBus: 0); installed = false }
         engine.stop()
+    }
+
+    func stop() {
+        opLock.lock(); defer { opLock.unlock() }
+        stateLock.lock(); stopped = true; stateLock.unlock()
+        teardownCapture()
         // 一時切替した既定入力を必ず元へ戻す。
         restoreDefaultInput()
     }
+}
+
+/// 取り込み経路の統計（stop 後の報告用）。
+struct LaneStats {
+    /// 書き込んだ総フレーム数（無音で補完したぶんを含む）。
+    var frames: Int64 = 0
+    /// うち無音で埋めたフレーム数。
+    var padded: Int64 = 0
+    /// 処理が詰まって捨てたバッファ数。
+    var dropped: Int64 = 0
+    /// 最初と最後のバッファの実時刻差（実測入力レートの算出用）。
+    var elapsed: Double = 0
+    /// 録音中に取り込みフォーマットが変わった回数（デバイス切替への追従）。
+    var formatChanges: Int = 0
 }
 
 /// 1 ソース分の取り込み経路（system / mic それぞれ 1 本）。
@@ -727,7 +909,9 @@ final class CaptureLane {
     private var normSrc: AVAudioFormat?
     private var frames: Int64 = 0
     private var baseHost: UInt64 = 0
+    private var lastHost: UInt64 = 0
     private var paddedFrames: Int64 = 0
+    private var formatChanges = 0
 
     // submit（リアルタイムスレッド）と queue の間で共有
     private let pendingLock = NSLock()
@@ -772,6 +956,7 @@ final class CaptureLane {
     private func process(_ pcm: AVAudioPCMBuffer, _ hostTime: UInt64) {
         if norm == nil || normSrc != pcm.format {
             if normSrc != nil && normSrc != pcm.format {
+                formatChanges += 1
                 logErr("\(label): 取り込みフォーマット変化（\(Int(normSrc?.sampleRate ?? 0))Hz → \(Int(pcm.format.sampleRate))Hz）に追従")
             }
             norm = FormatNormalizer(from: pcm.format, sampleRate: Double(sampleRate),
@@ -780,6 +965,7 @@ final class CaptureLane {
         }
         guard let out = norm?.convert(pcm), out.frameLength > 0 else { return }
         if baseHost == 0 { baseHost = hostTime }
+        lastHost = hostTime
 
         // 実時刻に対して書き込みが遅れていれば、そのぶんを無音で埋めてから書く。
         let elapsed = AVAudioTime.seconds(forHostTime: hostTime &- baseHost)
@@ -815,10 +1001,12 @@ final class CaptureLane {
     }
 
     /// 残りを処理しきってから統計を返す（stop 後に呼ぶ）。
-    func drain() -> (frames: Int64, padded: Int64, dropped: Int64) {
+    func drain() -> LaneStats {
         queue.sync {}
         pendingLock.lock(); let dropped = droppedBuffers; pendingLock.unlock()
-        return (frames, paddedFrames, dropped)
+        let elapsed = lastHost > baseHost ? AVAudioTime.seconds(forHostTime: lastHost &- baseHost) : 0
+        return LaneStats(frames: frames, padded: paddedFrames, dropped: dropped,
+                         elapsed: elapsed, formatChanges: formatChanges)
     }
 }
 
@@ -843,8 +1031,8 @@ final class Capture {
     // ソースごとの取り込み経路（変換・書き込みは lane 内の専用キューで行う）。
     private var sysLane: CaptureLane?
     private var micLane: CaptureLane?
-    private var sysStats: (frames: Int64, padded: Int64, dropped: Int64) = (0, 0, 0)
-    private var micStats: (frames: Int64, padded: Int64, dropped: Int64) = (0, 0, 0)
+    private var sysStats = LaneStats()
+    private var micStats = LaneStats()
     private var stopping = false
     private let stopLock = NSLock()
     private let levelLock = NSLock()
@@ -973,19 +1161,31 @@ final class Capture {
     }
 
     /// 取りこぼし（無音で埋めた区間）の報告。全体の 1% を超えたら警告として出す。
-    private func reportShortfall(
-        _ name: String, _ s: (frames: Int64, padded: Int64, dropped: Int64), enabled: Bool
-    ) {
-        guard enabled, s.frames > 0 else { return }
+    /// 原因の切り分けが要るので、実測入力レートとフォーマット変化の有無で文言を変える:
+    ///   - 録音中にフォーマットが変わった … デバイス切替への追従ぶん（再接続の数百 ms）。
+    ///   - 実測レートが想定より一定割合低い … 取り込みレートの取り違え（無音が等間隔に入る）。
+    ///   - それ以外 … CPU 負荷による散発的な取りこぼし。
+    private func reportShortfall(_ name: String, _ s: LaneStats, enabled: Bool) {
+        guard enabled else { return }
+        // 1 フレームも取れていない＝その系統は丸ごと無音。無言で終わらせない。
+        if s.frames == 0 {
+            logErr("⚠ \(name): 1 フレームも取得できませんでした（デバイスの接続状態・権限を確認してください）。")
+            return
+        }
         let ratio = Double(s.padded) / Double(s.frames)
         let secs = Double(s.padded) / Double(opt.sampleRate)
         if s.padded == 0 && s.dropped == 0 { return }
         let msg = "\(name): 取りこぼし \(String(format: "%.1f", secs))秒（\(String(format: "%.1f", ratio * 100))%）を無音で補完"
             + (s.dropped > 0 ? "・処理落ちで破棄 \(s.dropped) バッファ" : "")
-        if ratio > 0.01 {
-            logErr("⚠ \(msg)。CPU 負荷が高い可能性があります。")
+        guard ratio > 0.01 else { logErr(msg); return }
+        let measured = s.elapsed > 0 ? Double(s.frames - s.padded) / s.elapsed : 0
+        if s.formatChanges > 0 {
+            logErr("⚠ \(msg)。録音中に入力レートが変わりました（デバイス切替への追従ぶん）。")
+        } else if measured > 0 && measured < Double(opt.sampleRate) * 0.98 {
+            logErr("⚠ \(msg)。実測入力 \(Int(measured.rounded()))Hz / 想定 \(opt.sampleRate)Hz"
+                + " — デバイスのサンプルレート不一致の可能性があります。")
         } else {
-            logErr(msg)
+            logErr("⚠ \(msg)。CPU 負荷が高い可能性があります。")
         }
     }
 }
