@@ -11,23 +11,37 @@
 
 /* --- 録音ビュー --- */
 .rmr-view {
-  padding: 12px 16px;
+  padding: 16px;
+  overflow-y: auto;
+}
+/*
+ * 本文ペインで開くと横幅が 1000px を超えるため、読みやすい 1 カラム幅に収める（Issue #7）。
+ * container-type により、行のレイアウトは「ビューの幅」で切り替えられる（下の @container）。
+ */
+.rmr-shell {
+  max-width: 620px;
+  margin: 0 auto;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 18px;
+  container-type: inline-size;
 }
 .rmr-title-input {
   width: 100%;
-  font-size: 1.2em;
+  font-size: 1.15em;
   font-weight: 600;
-  background: transparent;
-  border: none;
-  border-bottom: 1px solid var(--background-modifier-border);
-  padding: 4px 0;
+  padding: 8px 10px;
 }
 .rmr-title-static {
-  font-size: 1.2em;
+  font-size: 1.15em;
   font-weight: 600;
+  padding: 8px 0;
+}
+/* 波形・経過時間・録音/停止ボタンのかたまり */
+.rmr-deck {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 .rmr-wave {
   min-height: 72px;
@@ -93,9 +107,12 @@
 .rmr-btn {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 6px 14px;
+  justify-content: center;
+  gap: 6px;
+  min-width: 112px;
+  padding: 9px 20px;
   border-radius: 6px;
+  font-weight: 600;
   cursor: pointer;
 }
 .rmr-btn:disabled {
@@ -119,17 +136,52 @@
 .rmr-btn-stop {
   color: var(--text-normal);
 }
-.rmr-panel {
+/* --- 設定セクション（録音設定 / 音量 / 詳細設定） --- */
+.rmr-section {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 12px;
+  padding-top: 14px;
   border-top: 1px solid var(--background-modifier-border);
-  padding-top: 10px;
+}
+.rmr-section-title {
+  color: var(--text-muted);
+  font-size: 0.8em;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+}
+.rmr-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+/* 折りたたみセクション: 三角マーカーを自前に差し替える */
+.rmr-section-fold > summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+  cursor: pointer;
+  list-style: none;
+}
+.rmr-section-fold > summary::-webkit-details-marker {
+  display: none;
+}
+.rmr-section-fold > summary::before {
+  content: "›";
+  display: inline-block;
+  font-size: 1.2em;
+  line-height: 1;
+  transition: transform 120ms ease;
+}
+.rmr-section-fold[open] > summary::before {
+  transform: rotate(90deg);
 }
 .rmr-row {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 12px;
+  min-height: 30px;
 }
 .rmr-row-label {
   width: 7em; /* 最長「システムゲート」（7文字）が収まる幅 */
@@ -142,19 +194,57 @@
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
+}
+/* 狭いサイドバーではラベルを上に積んで、コントロールに幅を譲る */
+@container (max-width: 400px) {
+  .rmr-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 4px;
+  }
+  .rmr-row-label {
+    width: auto;
+  }
 }
 .rmr-radios {
-  gap: 14px;
+  gap: 2px;
+  flex-wrap: wrap;
 }
-.rmr-radio {
+/* ラジオ／チェックボックスは文字ごと押せるようにし、余白でクリック領域を広げる */
+.rmr-radio,
+.rmr-check {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
+  padding: 5px 9px;
+  border-radius: var(--radius-s);
   cursor: pointer;
+}
+.rmr-check {
+  margin-left: -9px; /* 左端をラベル列と揃える */
+}
+.rmr-radio:hover,
+.rmr-check:hover {
+  background-color: var(--background-modifier-hover);
+}
+.rmr-check-text {
+  color: var(--text-muted);
+  font-size: 0.9em;
+}
+.rmr-radio.rmr-disabled,
+.rmr-check.rmr-disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.rmr-radio.rmr-disabled:hover,
+.rmr-check.rmr-disabled:hover {
+  background-color: transparent;
 }
 .rmr-save-input,
 .rmr-select {
   flex: 1;
+  min-width: 0;
 }
 .rmr-hint,
 .rmr-static {
@@ -175,6 +265,7 @@
 }
 .rmr-embed-pick {
   flex-shrink: 0;
+  padding: 6px 12px;
   cursor: pointer;
 }
 .rmr-embed-clear {
@@ -185,6 +276,7 @@
 .rmr-recording-note {
   color: var(--text-muted);
   font-size: 0.9em;
+  text-align: center;
 }
 .rmr-warn {
   color: var(--color-orange);

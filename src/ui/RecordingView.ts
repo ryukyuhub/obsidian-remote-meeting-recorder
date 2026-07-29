@@ -14,6 +14,9 @@ import {
 
 export const RECORDING_VIEW_TYPE = "rmr-recording-view";
 
+/** ラジオの name をビューごとに分けるための連番（同名だと 2 つ開いたとき選択を奪い合う）。 */
+let viewSeq = 0;
+
 /** ノイズゲート選択肢（設定画面と同じ値・録音ビュー向けの短い表示名）。 */
 const GATE_OPTIONS: [string, string][] = [
   ["off", "オフ"],
@@ -55,6 +58,12 @@ export class RecordingView extends ItemView {
   // DOM 参照
   private timerEl: HTMLElement | null = null;
   private waveWrapEl: HTMLElement | null = null;
+
+  // 「詳細設定」セクションの開閉（再描画をまたいで保つ・既定は閉じる）
+  private advancedOpen = false;
+
+  // このビュー専用のラジオグループ名（本文ペインとサイドバーに同時に開いても独立させる）
+  private readonly radioGroup = `rmr-source-${++viewSeq}`;
 
   constructor(leaf: WorkspaceLeaf, plugin: RemoteMeetingRecorderPlugin) {
     super(leaf);
@@ -137,18 +146,24 @@ export class RecordingView extends ItemView {
   }
 
   // ================================================================
+  /**
+   * 画面構成（Issue #7 で整理）。窮屈さを避けるため、
+   * 幅の広い本文ペインでも 1 カラムの読みやすい幅（rmr-shell）に収め、
+   * 設定は「録音設定 / 音量 / 詳細設定（折りたたみ）」の 3 グループに分ける。
+   */
   private render(): void {
     const root = this.contentEl;
     root.empty();
     root.addClass("rmr-view");
+    const shell = root.createDiv({ cls: "rmr-shell" });
 
     const active = this.plugin.activeRecording;
 
     // --- 復旧バナー（保存が完了しなかった録音がある間ずっと出す） ---
-    this.buildRecoveryBanner(root);
+    this.buildRecoveryBanner(shell);
 
     // --- タイトル ---
-    const titleRow = root.createDiv({ cls: "rmr-title-row" });
+    const titleRow = shell.createDiv({ cls: "rmr-title-row" });
     if (active) {
       titleRow.createEl("div", { cls: "rmr-title-static", text: active.label || this.vTitle });
     } else {
@@ -160,13 +175,13 @@ export class RecordingView extends ItemView {
       titleInput.addEventListener("input", () => (this.vTitle = titleInput.value));
     }
 
-    // --- 波形 / 経過 ---
-    this.waveWrapEl = root.createDiv({ cls: "rmr-wave" });
-    this.timerEl = root.createDiv({ cls: "rmr-timer", text: "0:00" });
+    // --- 波形 / 経過 / トランスポート（録音操作のかたまり） ---
+    const deck = shell.createDiv({ cls: "rmr-deck" });
+    this.waveWrapEl = deck.createDiv({ cls: "rmr-wave" });
+    this.timerEl = deck.createDiv({ cls: "rmr-timer", text: "0:00" });
     this.buildWaveArea(active != null);
 
-    // --- トランスポート ---
-    const transport = root.createDiv({ cls: "rmr-transport" });
+    const transport = deck.createDiv({ cls: "rmr-transport" });
     this.addTransportButton(transport, "rmr-btn-rec", "circle", " 録音", this.recording, () =>
       void this.onRecord()
     );
@@ -174,32 +189,56 @@ export class RecordingView extends ItemView {
       void this.onStop()
     );
 
-    // --- 設定パネル ---
-    const panel = root.createDiv({ cls: "rmr-panel" });
-    this.buildSourceRow(panel, active != null);
-    this.buildSaveRow(panel, active != null);
-    if (!active) this.buildEmbedRow(panel);
-    this.buildInputRow(panel, active != null);
-    this.buildMonitorRow(panel);
-    this.buildStaticRow(panel, "Format", "M4A（固定）");
-    this.buildLevelRows(panel, active != null);
-    this.buildControlWindowRow(panel);
-    this.buildWhisperModelRow(panel);
-
     if (active) {
-      panel.createDiv({
+      deck.createDiv({
         cls: "rmr-recording-note",
         text: `録音中（${sourceLabel(active.source)}）— 設定は停止までロックされます`,
       });
     }
 
-    root.createDiv({
+    // --- 設定: 録音のたびに確認するもの ---
+    const basic = this.addSection(shell, "録音設定");
+    this.buildSourceRow(basic, active != null);
+    this.buildSaveRow(basic, active != null);
+    if (!active) this.buildEmbedRow(basic);
+    this.buildInputRow(basic, active != null);
+
+    // --- 設定: 音量（録音中もライブで触る） ---
+    const level = this.addSection(shell, "音量");
+    this.buildMonitorRow(level);
+    this.buildLevelRows(level, active != null);
+
+    // --- 設定: めったに変えないもの（既定は折りたたみ） ---
+    const advanced = this.addSection(shell, "詳細設定", true);
+    this.buildGateRows(advanced, active != null);
+    this.buildStaticRow(advanced, "形式", "M4A（固定）");
+    this.buildControlWindowRow(advanced);
+    this.buildWhisperModelRow(advanced);
+
+    shell.createDiv({
       cls: "rmr-warn",
       text:
         process.platform === "win32"
           ? "⚠ ノート PC の蓋を閉じる／スリープすると録音は止まります"
           : "⚠ MacBook の蓋を閉じる／スリープすると録音は止まります",
     });
+  }
+
+  /**
+   * 設定セクション（見出し＋行の入れ物）を作り、行を足す親要素を返す。
+   * collapsible=true なら details で折りたたむ（開閉状態は再描画をまたいで保つ）。
+   */
+  private addSection(parent: HTMLElement, title: string, collapsible = false): HTMLElement {
+    if (!collapsible) {
+      const sec = parent.createDiv({ cls: "rmr-section" });
+      sec.createDiv({ cls: "rmr-section-title", text: title });
+      return sec.createDiv({ cls: "rmr-rows" });
+    }
+    const sec = parent.createEl("details", { cls: "rmr-section rmr-section-fold" });
+    sec.open = this.advancedOpen;
+    sec.addEventListener("toggle", () => (this.advancedOpen = sec.open));
+    sec.createEl("summary", { cls: "rmr-section-title", text: title });
+    return sec.createDiv({ cls: "rmr-rows" });
   }
 
   /**
@@ -286,12 +325,13 @@ export class RecordingView extends ItemView {
   }
 
   private buildSourceRow(panel: HTMLElement, locked: boolean): void {
-    const opts = this.addRow(panel, "Source", "rmr-radios");
+    const opts = this.addRow(panel, "音源", "rmr-radios");
     const active = this.plugin.activeRecording;
     const current = active ? active.source : this.vSource;
     (["both", "system", "mic"] as RecorderSource[]).forEach((src) => {
       const lbl = opts.createEl("label", { cls: "rmr-radio" });
-      const input = lbl.createEl("input", { attr: { type: "radio", name: "rmr-source" } });
+      if (locked) lbl.addClass("rmr-disabled");
+      const input = lbl.createEl("input", { attr: { type: "radio", name: this.radioGroup } });
       input.checked = current === src;
       input.disabled = locked;
       input.addEventListener("change", () => {
@@ -305,7 +345,7 @@ export class RecordingView extends ItemView {
   }
 
   private buildSaveRow(panel: HTMLElement, locked: boolean): void {
-    const control = this.addRow(panel, "Save to");
+    const control = this.addRow(panel, "保存先");
     const input = control.createEl("input", {
       cls: "rmr-save-input",
       attr: { type: "text", placeholder: "Recordings" },
@@ -357,7 +397,7 @@ export class RecordingView extends ItemView {
   }
 
   private buildInputRow(panel: HTMLElement, locked: boolean): void {
-    const control = this.addRow(panel, "Input");
+    const control = this.addRow(panel, "入力");
     const select = control.createEl("select", { cls: "rmr-select dropdown" });
     const optDefault = select.createEl("option", { text: "既定", value: "" });
     if (!this.vMicDevice) optDefault.selected = true;
@@ -369,27 +409,32 @@ export class RecordingView extends ItemView {
     select.addEventListener("change", () => (this.vMicDevice = select.value));
   }
 
-  /** ラベル付きチェックボックス行の共通生成（Monitor / Auto gain）。 */
+  /**
+   * ラベル付きチェックボックス行の共通生成（試聴 / 自動ゲイン等）。
+   * 説明文まで含めて label にするので、文字のどこを押しても切り替わる（Issue #7）。
+   */
   private buildCheckboxRow(
     panel: HTMLElement,
     label: string,
     opts: {
       checked: boolean;
       disabled?: boolean;
-      hint?: string;
+      hint: string;
       onChange: (checked: boolean) => void;
     }
   ): void {
     const control = this.addRow(panel, label);
-    const cb = control.createEl("input", { attr: { type: "checkbox" } });
+    const box = control.createEl("label", { cls: "rmr-check" });
+    if (opts.disabled) box.addClass("rmr-disabled");
+    const cb = box.createEl("input", { attr: { type: "checkbox" } });
     cb.checked = opts.checked;
     if (opts.disabled) cb.disabled = true;
     cb.addEventListener("change", () => opts.onChange(cb.checked));
-    if (opts.hint) control.createSpan({ cls: "rmr-hint", text: opts.hint });
+    box.createSpan({ cls: "rmr-check-text", text: opts.hint });
   }
 
   private buildMonitorRow(panel: HTMLElement): void {
-    this.buildCheckboxRow(panel, "Monitor", {
+    this.buildCheckboxRow(panel, "試聴", {
       checked: this.vMonitor,
       hint: "入力を試聴（ヘッドホン推奨）",
       onChange: (checked) => {
@@ -405,8 +450,8 @@ export class RecordingView extends ItemView {
 
   /**
    * レベル調整の行群。「手動ミキサー」トグル（Manual モード＝AGC 置き換え）と、
-   * Manual 時はソース別フェーダー、Auto 時は Auto gain チェックを出す。
-   * モード切替は録音中ロック。フェーダーは Monitor と同じく録音中もライブ変更可。
+   * Manual 時はソース別フェーダー、Auto 時は「自動ゲイン」チェックを出す。
+   * モード切替は録音中ロック。フェーダーは試聴と同じく録音中もライブ変更可。
    */
   private buildLevelRows(panel: HTMLElement, locked: boolean): void {
     const active = this.plugin.activeRecording;
@@ -415,7 +460,7 @@ export class RecordingView extends ItemView {
     this.buildCheckboxRow(panel, "手動ミキサー", {
       checked: isManual,
       disabled: locked,
-      hint: "システム音とマイクを個別に手動調整（Auto gain は無効）",
+      hint: "システム音とマイクを個別に手動調整（自動ゲインは無効）",
       onChange: (checked) => {
         this.vManualMix = checked;
         this.render();
@@ -437,16 +482,22 @@ export class RecordingView extends ItemView {
         });
       }
     } else {
-      this.buildCheckboxRow(panel, "Auto gain", {
+      this.buildCheckboxRow(panel, "自動ゲイン", {
         checked: active ? active.agc === "on" : this.vAgc,
         disabled: locked,
+        hint: "小さすぎる声を自動で持ち上げる",
         onChange: (checked) => (this.vAgc = checked),
       });
     }
+  }
 
-    // ノイズゲート（無音カット）は AGC・手動ミキサーのどちらとも独立に効く（切るのはゲート
-    // 設定の「オフ」のみ・設定画面と双方向同期）。録音開始時に固定される値
-    // （macOS: sysrec 引数 / Windows: Web 録音の初期化）なので、録音中はロック（次の録音から反映）。
+  /**
+   * ノイズゲート（無音カット）の行群。AGC・手動ミキサーのどちらとも独立に効く（切るのはゲート
+   * 設定の「オフ」のみ・設定画面と双方向同期）。録音開始時に固定される値
+   * （macOS: sysrec 引数 / Windows: Web 録音の初期化）なので、録音中はロック（次の録音から反映）。
+   */
+  private buildGateRows(panel: HTMLElement, locked: boolean): void {
+    const active = this.plugin.activeRecording;
     const s = this.plugin.settings;
     const gateSrc = active ? active.source : this.vSource;
     if (gateSrc !== "system") {
