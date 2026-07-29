@@ -529,6 +529,20 @@ function whisperExecCheck(bin: string, redownload: DoctorFix): DoctorCheck {
       fix: redownload,
     };
   }
+  // クラウドドライブ（Google Drive 等）上の exe はコールド起動が確認タイムアウトを
+  // 超えることがある。セキュリティ機能によるブロックとは別物なので誤解させない文言にする。
+  if (probe.spawnCode === "ETIMEDOUT") {
+    return {
+      id: "whispercpp-bin",
+      label: "whisper.cpp バイナリ",
+      status: "warn",
+      detail:
+        `起動確認が ${PROBE_TIMEOUT_MS / 1000} 秒以内に完了しませんでした（ETIMEDOUT）。\n` +
+        "クラウドドライブ（Google Drive 等）上にある場合、初回起動が遅いだけの可能性があり、文字起こし自体は動くことがあります。\n" +
+        "このフォルダを Drive で「オフラインで使用可能」にすると安定します。\n" +
+        `対象: ${bin}`,
+    };
+  }
   return {
     id: "whispercpp-bin",
     label: "whisper.cpp バイナリ",
