@@ -18,6 +18,8 @@ export interface BrowserWindowLike {
   webContents: {
     on(event: string, listener: () => void): unknown;
     send(channel: string, data: unknown): unknown;
+    /** 背景化時のタイマー/アニメーション抑制の切り替え（Issue #9・版により無い）。 */
+    setBackgroundThrottling?: (allowed: boolean) => void;
   };
   on(event: string, listener: () => void): unknown;
   setAlwaysOnTop(flag: boolean, level?: string): void;
@@ -40,6 +42,8 @@ export interface OpenDialogResultLike {
 /** getElectronRemote() が返すオブジェクトのうち、プラグインが使う面。 */
 export interface ElectronRemoteLike {
   BrowserWindow?: new (opts: Record<string, unknown>) => BrowserWindowLike;
+  /** Obsidian 本体のウィンドウ（＝このレンダラ自身）。背景化時の抑制解除に使う。 */
+  getCurrentWindow?: () => BrowserWindowLike;
   screen?: { getPrimaryDisplay?: () => { workAreaSize?: { width: number; height: number } } };
   ipcMain?: IpcMainLike;
   dialog?: { showOpenDialog(opts: Record<string, unknown>): Promise<OpenDialogResultLike> };

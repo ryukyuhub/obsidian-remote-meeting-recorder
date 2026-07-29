@@ -187,9 +187,13 @@ export const CONTROL_WINDOW_HTML = `<!doctype html>
           }
           ctx.globalAlpha = 1;
         }
-        requestAnimationFrame(draw);
       }
-      requestAnimationFrame(draw);
+
+      // 描画は setInterval で回す（Issue #9）。requestAnimationFrame は「見えていない窓」では
+      // 呼ばれないため、別の仮想デスクトップ／別 Space にミニ窓があるとメーターが凍っていた。
+      // この窓は backgroundThrottling:false で作っているので、背面でもタイマーは絞られない。
+      setInterval(draw, 16);
+      draw();
     </script>
   </body>
 </html>

@@ -43,6 +43,8 @@ export class ControlWindowManager {
   private stopHandler: ((...args: unknown[]) => void) | null = null;
   private gainHandler: ((...args: unknown[]) => void) | null = null;
   private levelTimer: number | null = null;
+  /** 親（Obsidian 本体）の背景抑制を解除したか。cleanup で必ず戻すために持つ。 */
+  private parentThrottlingDisabled = false;
 
   open(
     config: ControlWindowConfig,
@@ -135,9 +137,42 @@ export class ControlWindowManager {
 
     // ソース別レベル送出（親 → 子・~16fps）
     this.levelTimer = window.setInterval(() => this.safeSend(CH_LEVEL, getSourceLevels()), 60);
+    this.keepParentAwake(remote);
 
     win.on("closed", () => this.cleanup());
     return true;
+  }
+
+  /**
+   * 親（Obsidian 本体）の背景抑制を解除する（Issue #9）。
+   *
+   * レベルはこのレンダラのタイマーが読んで子へ送っている。ミニ窓を使う場面では会議アプリが
+   * 前面＝Obsidian は背面（別の仮想デスクトップ／別 Space）になるが、背景化したウィンドウの
+   * setInterval は Chromium に 1 秒間隔まで絞られるため、送出が止まってメーターが凍る。
+   * ミニ窓を開いている間だけ解除し、閉じるときに必ず戻す。
+   */
+  private keepParentAwake(remote: ElectronRemoteLike): void {
+    try {
+      const parent = remote.getCurrentWindow?.();
+      const wc = parent?.webContents;
+      if (!wc?.setBackgroundThrottling) return;
+      wc.setBackgroundThrottling(false);
+      this.parentThrottlingDisabled = true;
+    } catch {
+      /* 非対応なら諦める（可視時は従来どおり動く） */
+    }
+  }
+
+  /** 親の背景抑制を元に戻す（解除したときだけ）。 */
+  private restoreParentThrottling(): void {
+    if (!this.parentThrottlingDisabled) return;
+    this.parentThrottlingDisabled = false;
+    try {
+      const remote = getElectronRemote() as ElectronRemoteLike | null;
+      remote?.getCurrentWindow?.()?.webContents?.setBackgroundThrottling?.(true);
+    } catch {
+      /* noop */
+    }
   }
 
   tick(elapsedSec: number): void {
@@ -176,6 +211,7 @@ export class ControlWindowManager {
       window.clearInterval(this.levelTimer);
       this.levelTimer = null;
     }
+    this.restoreParentThrottling();
     if (this.ipcMain) {
       try {
         if (this.stopHandler) this.ipcMain.removeListener(CH_STOP, this.stopHandler);
