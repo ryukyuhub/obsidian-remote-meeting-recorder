@@ -366,7 +366,8 @@ function binaryProbeChecks(binPath: string, executable: boolean): DoctorCheck[] 
 /**
  * Windows 用の診断（Windows対応 実装計画 §Phase W3）。
  * macOS 固有（sysrec/codesign/lipo/xattr/TCC）は該当しないため、ループバック可否・
- * 録音フォーマット・マイク許可案内・状態ディレクトリ・文字起こしのみを見る。
+ * 録音フォーマット・マイク許可案内・状態ディレクトリ・文字起こし・
+ * Smart App Control（未署名バイナリのブロック）を見る。
  */
 function windowsDoctor(ctx: RecorderContext): DoctorCheck[] {
   const checks: DoctorCheck[] = [];
@@ -422,7 +423,65 @@ function windowsDoctor(ctx: RecorderContext): DoctorCheck[] {
   // 6. 文字起こし（whisper.cpp・録音とは独立）
   checks.push(...transcribeChecks(ctx));
 
+  // 7. Smart App Control の状態（Issue #8 の補完・下の関数コメント参照）
+  checks.push(smartAppControlCheck());
+
   return checks;
+}
+
+/**
+ * Smart App Control（SAC）の状態をレジストリで検査（Windows のみ・Issue #8 の補完）。
+ * whisperExecCheck は起動そのものが止められた場合しか検出できないが、SAC は exe の起動を
+ * 許しつつ同梱 DLL（ggml-cpu-*.dll）の読み込みだけを止めることもある（CodeIntegrity 3033/3077）。
+ * その場合は診断が [OK] のまま OS の警告ポップアップだけが出続け、文字起こしは失敗・低速化しうる。
+ * そのため強制モードなら起動可否に関わらず警告する。SAC には除外リストが無く、対処はオフの一択。
+ * 値は VerifiedAndReputablePolicyState（1=強制 / 2=評価 / 0=オフ・値なし=非搭載）。
+ */
+function smartAppControlCheck(): DoctorCheck {
+  const r = tryExecSync("reg", [
+    "query",
+    "HKLM\\SYSTEM\\CurrentControlSet\\Control\\CI\\Policy",
+    "/v",
+    "VerifiedAndReputablePolicyState",
+  ]);
+  const m = r.stdout.match(/VerifiedAndReputablePolicyState\s+REG_DWORD\s+0x([0-9a-fA-F]+)/);
+  const state = m ? parseInt(m[1], 16) : null;
+  if (state === 1) {
+    return {
+      id: "smart-app-control",
+      label: "Smart App Control",
+      status: "warn",
+      detail:
+        "有効（強制モード）です。同梱の whisper.cpp はコード署名が無いため、本体や DLL の読み込みが" +
+        "ブロックされることがあります（文字起こしの失敗・低速化、OS の警告ポップアップの原因）。\n" +
+        "文字起こしを使う場合は Windows セキュリティ →「アプリとブラウザーの制御」→" +
+        "「スマート アプリ コントロール」をオフにしてください（録音自体には影響しません）。\n" +
+        "注意: 2026-04 より前の Windows では、一度オフにすると元へ戻せない場合があります。",
+      fix: {
+        label: "対処方法を開く",
+        run: async () => {
+          window.open(SMART_APP_CONTROL_HELP_URL);
+          return "Microsoft の案内ページを開きました。設定を変更したあと、診断を再実行してください。";
+        },
+      },
+    };
+  }
+  if (state === 2) {
+    return {
+      id: "smart-app-control",
+      label: "Smart App Control",
+      status: "info",
+      detail:
+        "評価モードです。今はブロックされませんが、Windows の判断で自動的に強制モードへ" +
+        "切り替わることがあり、切り替わると whisper.cpp がブロックされ文字起こしが失敗します。",
+    };
+  }
+  return {
+    id: "smart-app-control",
+    label: "Smart App Control",
+    status: "ok",
+    detail: "オフ（または非搭載）です。文字起こしバイナリはブロックされません。",
+  };
 }
 
 /**
