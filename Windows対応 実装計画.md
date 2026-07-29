@@ -94,6 +94,29 @@ Windows で「録音は進むのに中身が無音」の報告（Issue #4）を�
 
 lint クリーン・`npm run build` 通過。配送は `\\wsl.localhost\AlmaLinux-10\home\candyma\obsidian-remote-meeting-recorder\` の `main.js`＋`manifest.json` を Vault の `plugins/remote-meeting-recorder\` へコピー。
 
+## 1.5 W5: 録音中にフェーダーを動かしても録音レベルが変わらない（Issue #10）
+
+### 分かったこと
+- **仕上げ正規化（`normGain`）が手動ミキサー中も動いていた**。この正規化は録音開始からの
+  **累積 RMS** を目標（`NORM_TARGET_RMS` = 0.2）へ寄せ続けるため、ユーザーがフェーダーを
+  上げると累積 RMS の上昇に追随してゲインを下げ、**上げたぶんを打ち消す**。時定数 1 秒・
+  クランプ ±18 dB なので、フェーダーの可動域（±24 dB）はほぼ相殺され得る。
+- macOS はこの問題を持たない。正規化は**停止後に 1 つの静的ゲインを全体へ掛ける**方式
+  （`sysrec normalize` → `loudnessGain` → `applyStaticGain`）で、録音中の増減は比率として残る。
+  実測（macOS・sysrec 0.11.2）: 録音中に +18 dB → level ファイル 0.0317 → 0.2512、
+  録音ファイルは -30.1 dB → -12.9 dB（+17.2 dB・差はリミッター分）。
+- AGC は手動モードで既に無効（`this.agc = !!o.agc && !o.manualMix`）だったが、正規化には
+  同じ除外が入っていなかった。
+
+### 入れた対処
+- `stepLevels()` で**手動ミキサー中は正規化を回さない**（`normGain` は 1.0 のまま）。
+  設定画面が謳う「フェーダーで作ったバランスは保存時もそのまま保たれます」を Windows でも守る。
+- クリップ防止のリミッターは手動モードでも常時有効のまま（歪み防止はレベル調整とは別機能）。
+
+### 検証
+- macOS 実機で「録音中のゲイン変更が録音に載る」ことを実測（上記）。**Windows 実機は未検証**
+  （手動 E2E `06-ui-settings.md` の UI-04c を参照）。
+
 ## 2. フェーズ計画
 
 ### Phase W0 — 疎通検証スパイク（最優先・プラグイン改変/ビルド不要）

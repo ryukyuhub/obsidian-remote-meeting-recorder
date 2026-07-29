@@ -132,6 +132,8 @@ const AGC_TICK_MS = 100;
 /**
  * 1 ソース分の処理チェーン:
  *   source → gain(手動) → agcGain(自動) → gateGain(無音カット) → normGain(仕上げ正規化) → limiter → dest
+ * 手動ミキサー中は agcGain と normGain を動かさない（1.0 のまま）。自動調整がフェーダー操作を
+ * 打ち消さないようにするため（Issue #10）。
  * 測定タップは 2 箇所。`analyser` は手動フェーダー直後（メーター表示・AGC 入力・ゲート判定）、
  * `postAgcAnalyser` はゲート直後（正規化の入力）。macOS の normalize が「AGC・ゲート済みの
  * 録音ファイル」を測るのと同じ位置に合わせるため、正規化だけ測定点が後ろになる。
@@ -517,6 +519,14 @@ export class WebRecorder {
     }
 
     // 仕上げ正規化は AGC 適用後を測る（macOS が AGC 済みファイルを測るのと同じ位置）。
+    //
+    // 手動ミキサー中は掛けない（Issue #10）。この正規化は録音開始からの累積 RMS を目標
+    // （0.2）へ寄せ続けるので、ユーザーがフェーダーを上げると「上がったぶん」を打ち消す
+    // 方向にゲインを下げてしまい、**録音中にレベルを変えても変化が無い**状態になる。
+    // macOS は停止後に 1 つの静的ゲインを掛ける方式なので、録音中の増減はそのまま残る。
+    // Windows もそれに合わせ、手動モードでは正規化を止めてユーザーの操作を優先する
+    // （クリップ防止のリミッターは手動モードでも常時有効なまま）。
+    if (this.manualMix) return;
     chain.postAgcAnalyser.getFloatTimeDomainData(chain.postRmsData);
     chain.norm = nextNormalizerState(rmsOf(chain.postRmsData), chain.norm, dt);
     chain.normGain.gain.setTargetAtTime(chain.norm.gain, now, 0.05);

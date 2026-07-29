@@ -460,7 +460,7 @@ export class RecordingView extends ItemView {
     this.buildCheckboxRow(panel, "手動ミキサー", {
       checked: isManual,
       disabled: locked,
-      hint: "システム音とマイクを個別に手動調整（自動ゲインは無効）",
+      hint: "システム音とマイクを個別に手動調整（自動のレベル調整は無効）",
       onChange: (checked) => {
         this.vManualMix = checked;
         this.render();
