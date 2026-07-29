@@ -27,6 +27,7 @@ export { restoreInProgressSessions } from "./src/recorder/restore";
 export { nextAgcState, initialAgcState, rmsOf, AGC_TARGET_RMS, AGC_GATE_RMS, AGC_MAX_GAIN, AGC_MIN_GAIN } from "./src/recorder/agc";
 export { nextNormalizerState, initialNormalizerState, NORM_TARGET_RMS, NORM_GATE_RMS, NORM_MAX_GAIN, NORM_MIN_GAIN, NORM_WARMUP_SEC } from "./src/recorder/agc";
 export { nextGateState, initialGateState, gateOpenRmsOf, GATE_FLOOR, GATE_HOLD_SEC, GATE_OPEN_TAU, GATE_CLOSE_TAU } from "./src/recorder/agc";
+export { isBlockedSpawnError, isBlockedExit, isMissingDllExit, describeExitCode } from "./src/util/winBlock";
 `;
 const result = await build({
   stdin: { contents: entry, resolveDir: repoRoot, sourcefile: "e2e-entry.ts", loader: "ts" },
@@ -570,7 +571,67 @@ function testWebGateCore() {
 }
 
 // ====================================================================
+// [16] Windows のセキュリティ機能による whisper ブロックの判定（Issue #8）。
+// Windows 実機が無くても回帰を検出できるよう、platform を注入して両 OS を検証する。
+function testWinBlockDetection() {
+  console.log("\n[16] Windows の実行ブロック判定（whisper・Issue #8）");
+  const WIN = "win32";
+  const MAC = "darwin";
+  const INVALID_IMAGE_HASH = 3221226024; // 0xC0000428 署名検証で拒否
+  const DLL_NOT_FOUND = 3221225781; // 0xC0000135 依存 DLL 不足
+
+  // 1) 出力ゼロのまま署名エラーで落ちた＝実行前に止められている。
+  ok(
+    api.isBlockedExit(INVALID_IMAGE_HASH, false, WIN),
+    "出力ゼロ＋STATUS_INVALID_IMAGE_HASH をブロックと判定する"
+  );
+
+  // 2) 何か出力していれば whisper は実際に走っている＝ブロックではない（誤検出防止）。
+  ok(
+    !api.isBlockedExit(INVALID_IMAGE_HASH, true, WIN),
+    "出力があればブロックと判定しない（whisper 自身の失敗）"
+  );
+
+  // 3) POSIX の終了コードは 0-255 なので、同じ値でも Windows 以外では判定しない。
+  ok(!api.isBlockedExit(225, false, MAC), "macOS では exit 225 をブロックと判定しない");
+  ok(api.isBlockedExit(225, false, WIN), "Windows では ERROR_VIRUS_INFECTED をブロックと判定する");
+
+  // 4) CreateProcess 自体が失敗する経路（libuv がマップできず UNKNOWN になる）。
+  ok(
+    api.isBlockedSpawnError({ code: "UNKNOWN" }, WIN),
+    "spawn の UNKNOWN をブロックと判定する（Windows）"
+  );
+  ok(
+    !api.isBlockedSpawnError({ code: "EACCES" }, MAC),
+    "macOS の EACCES はブロックと判定しない（実行権限の問題）"
+  );
+  ok(
+    !api.isBlockedSpawnError({ code: "ENOENT" }, WIN),
+    "ENOENT はブロックと判定しない（ファイルが無いだけ）"
+  );
+  ok(
+    !api.isBlockedSpawnError({ code: "ETIMEDOUT" }, WIN),
+    "ETIMEDOUT はブロックと判定しない（タイムアウト）"
+  );
+
+  // 5) DLL 不足はブロックとは別問題（案内も再取得と異なる）。
+  ok(api.isMissingDllExit(DLL_NOT_FOUND, WIN), "STATUS_DLL_NOT_FOUND を DLL 不足と判定する");
+  ok(
+    !api.isBlockedExit(DLL_NOT_FOUND, false, WIN),
+    "DLL 不足はブロックと判定しない（取り違え防止）"
+  );
+
+  // 6) サポート用に終了コードを人間が読める形にする。
+  ok(
+    api.describeExitCode(INVALID_IMAGE_HASH).includes("STATUS_INVALID_IMAGE_HASH"),
+    "既知コードは名前付きで説明する"
+  );
+  ok(api.describeExitCode(3).includes("exit 3"), "未知コードは exit 値をそのまま出す");
+}
+
+// ====================================================================
 try {
+  testWinBlockDetection();
   testWebAgcCore();
   testWebNormalizerCore();
   testWebGateCore();

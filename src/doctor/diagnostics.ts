@@ -20,6 +20,13 @@ import {
   downloadWhisperModel,
   DEFAULT_WHISPER_MODEL,
 } from "../transcribe/resolveWhisper";
+import {
+  SMART_APP_CONTROL_HELP_URL,
+  describeExitCode,
+  isBlockedExit,
+  isBlockedSpawnError,
+  isMissingDllExit,
+} from "../util/winBlock";
 
 // 外部コマンドのタイムアウト（ms）
 const PROBE_TIMEOUT_MS = 5000; // codesign/lipo/xattr/list-devices 等の短命プローブ
@@ -46,6 +53,35 @@ export interface DoctorCheck {
   status: DoctorStatus;
   detail: string;
   fix?: DoctorFix;
+}
+
+/** 外部コマンドを実際に起動してみた結果（起動可否の判定に使う）。 */
+interface ExecProbe {
+  /** 終了コード（起動できなかったときは null）。 */
+  status: number | null;
+  /** 起動できなかったときの Node のエラーコード（UNKNOWN / ENOENT / ETIMEDOUT 等）。 */
+  spawnCode?: string;
+  /** stdout+stderr。1 バイトでも出ていればプロセスは実際に走っている。 */
+  output: string;
+}
+
+/** 外部コマンドを起動して終了コード・出力を取る（例外にせず ExecProbe で返す）。 */
+function probeExec(cmd: string, args: string[]): ExecProbe {
+  try {
+    const out = execFileSync(cmd, args, {
+      encoding: "utf8",
+      timeout: PROBE_TIMEOUT_MS,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    return { status: 0, output: out ?? "" };
+  } catch (e) {
+    const err = e as { status?: number | null; code?: string; stdout?: string; stderr?: string };
+    return {
+      status: typeof err.status === "number" ? err.status : null,
+      spawnCode: typeof err.code === "string" ? err.code : undefined,
+      output: `${err.stdout ?? ""}${err.stderr ?? ""}`,
+    };
+  }
 }
 
 /** 外部コマンドの終了コードだけ取る（0=成功 / N=失敗 / null=起動不可）。 */
@@ -389,6 +425,60 @@ function windowsDoctor(ctx: RecorderContext): DoctorCheck[] {
   return checks;
 }
 
+/**
+ * whisper バイナリを `--help` で実際に起動してみる（Issue #8）。
+ * 出力が 1 バイトでもあればプロセスは走っているので、終了コードに関わらず「起動できる」と見なす。
+ * 出力ゼロのままブロック用コードで落ちた場合だけ、セキュリティ機能による阻止として報告する。
+ */
+function whisperExecCheck(bin: string, redownload: DoctorFix): DoctorCheck {
+  const probe = probeExec(bin, ["--help"]);
+  const launched = probe.output.length > 0 || probe.status === 0;
+  if (launched) {
+    return {
+      id: "whispercpp-bin",
+      label: "whisper.cpp バイナリ",
+      status: "ok",
+      detail: `${bin}（起動確認済み）`,
+    };
+  }
+  if (isBlockedSpawnError({ code: probe.spawnCode }) || isBlockedExit(probe.status, false)) {
+    return {
+      id: "whispercpp-bin",
+      label: "whisper.cpp バイナリ",
+      status: "ng",
+      detail:
+        "Windows のセキュリティ機能に起動をブロックされています" +
+        `（${probe.spawnCode ?? describeExitCode(probe.status)}）。\n` +
+        "同梱の whisper.cpp はコード署名が無いため、スマート アプリ コントロールが有効だと実行できません。\n" +
+        "Windows セキュリティ →「アプリとブラウザーの制御」→「スマート アプリ コントロール」をオフにしてください。\n" +
+        `対象: ${bin}`,
+      fix: {
+        label: "対処方法を開く",
+        run: async () => {
+          window.open(SMART_APP_CONTROL_HELP_URL);
+          return "Microsoft の案内ページを開きました。設定を変更したあと、診断を再実行してください。";
+        },
+      },
+    };
+  }
+  if (isMissingDllExit(probe.status)) {
+    return {
+      id: "whispercpp-bin",
+      label: "whisper.cpp バイナリ",
+      status: "ng",
+      detail: `必要な DLL が見つからず起動できません（展開が不完全な可能性があります）。\n対象: ${bin}`,
+      fix: redownload,
+    };
+  }
+  return {
+    id: "whispercpp-bin",
+    label: "whisper.cpp バイナリ",
+    status: "warn",
+    detail:
+      `起動できませんでした（${probe.spawnCode ?? describeExitCode(probe.status)}）。\n対象: ${bin}`,
+  };
+}
+
 /** 文字起こし（同梱 whisper.cpp）のバイナリ/モデルをチェック。 */
 function transcribeChecks(ctx: RecorderContext): DoctorCheck[] {
   const s = ctx.settings;
@@ -418,17 +508,22 @@ function transcribeChecks(ctx: RecorderContext): DoctorCheck[] {
     },
   };
 
-  out.push({
-    id: "whispercpp-bin",
-    label: "whisper.cpp バイナリ",
-    status: bin ? "ok" : "warn",
-    detail: bin
-      ? bin
-      : isWin
+  if (!bin) {
+    out.push({
+      id: "whispercpp-bin",
+      label: "whisper.cpp バイナリ",
+      status: "warn",
+      detail: isWin
         ? "見つかりません。文字起こしを使う場合は「Windows 版 whisper を取得」で whisper.cpp（CPU 版）を取得できます。"
         : "見つかりません。`npm run build-whisper` でビルドするか `brew install whisper-cpp` してください。",
-    fix: bin ? undefined : isWin ? winWhisperFix : undefined,
-  });
+      fix: isWin ? winWhisperFix : undefined,
+    });
+  } else {
+    // ファイルがあっても起動できるとは限らない（Issue #8: Windows のスマート アプリ
+    // コントロールが署名の無い whisper をブロックする）。会議のあとに初めて気付くのを
+    // 避けるため、ここで実際に起動して確かめる。
+    out.push(whisperExecCheck(bin, winWhisperFix));
+  }
 
   const model = resolveWhisperModel(ctx.pluginDir, s.whisperCppModel);
   const dlName = (s.whisperCppModel || DEFAULT_WHISPER_MODEL).trim();

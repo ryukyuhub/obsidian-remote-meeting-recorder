@@ -10,6 +10,11 @@ import { computeVaultRelative, wikilinkEmbed } from "../ui/embed";
 import { resolveDailyNote } from "../ui/dailyNote";
 import { formatClock, formatDate } from "../util/time";
 import { safeUnlink } from "../util/fsx";
+import {
+  LaunchBlockedError,
+  MissingDllError,
+  SMART_APP_CONTROL_HELP_URL,
+} from "../util/winBlock";
 
 export function readArrayBuffer(p: string): ArrayBuffer {
   const buf = fs.readFileSync(p);
@@ -66,13 +71,77 @@ export async function runTranscription(
 
     new Notice("文字起こしが完了しました。");
   } catch (e) {
-    // Notice は表示が切れるため、原因追跡用にフルのエラー（whisper の stderr 含む）を console にも出す。
-    console.error("[remote-meeting-recorder] 文字起こしに失敗", e);
-    new Notice(`文字起こしに失敗: ${(e as Error).message}`, 10000);
+    notifyTranscribeFailure(plugin, e);
   } finally {
     window.clearInterval(ticker);
     notice.hide();
   }
+}
+
+/**
+ * 文字起こし失敗の通知（録音後の自動実行・右クリック実行で共通）。
+ *
+ * Windows のセキュリティ機能に whisper の起動を止められた場合（Issue #8）は、原因も対処も
+ * ユーザーには分からないうえ、10 秒で消える Notice では読み切れない。**消えない Notice** に
+ * 「録音は無事」「解除後に再実行できる」「対処ページを開く」までを載せる。
+ * 解除しない選択もできるよう、録音後の自動実行をその場で止めるボタンも出す
+ * （放っておくと録音のたびに OS の警告ポップアップが出続けるため）。
+ */
+export function notifyTranscribeFailure(
+  plugin: RemoteMeetingRecorderPlugin,
+  e: unknown
+): void {
+  // Notice は表示が切れるため、原因追跡用にフルのエラー（whisper の stderr 含む）を console にも出す。
+  console.error("[remote-meeting-recorder] 文字起こしに失敗", e);
+
+  if (e instanceof LaunchBlockedError) {
+    const notice = new Notice(
+      createFragment((frag) => {
+        frag.createDiv({ text: "⚠ Windows のセキュリティ機能が文字起こし（whisper）の起動をブロックしました" });
+        frag.createDiv({
+          cls: "rmr-notice-item",
+          text: "録音は保存済みです。ブロックを解除したあと、音声ファイルを右クリック →「文字起こし」でやり直せます。",
+        });
+        frag.createDiv({
+          cls: "rmr-notice-item",
+          text: "Windows セキュリティ →「アプリとブラウザーの制御」→「スマート アプリ コントロール」をオフにすると実行できます。",
+        });
+        frag.createDiv({ cls: "rmr-notice-item", text: `詳細: ${e.reason}` });
+        const open = frag.createEl("button", { cls: "rmr-notice-action", text: "対処方法を開く" });
+        open.addEventListener("click", () => {
+          notice.hide();
+          window.open(SMART_APP_CONTROL_HELP_URL);
+        });
+        if (plugin.settings.transcribeOnStop) {
+          const off = frag.createEl("button", {
+            cls: "rmr-notice-action",
+            text: "録音後の自動文字起こしをオフにする",
+          });
+          off.addEventListener("click", () => {
+            notice.hide();
+            plugin.settings.transcribeOnStop = false;
+            void plugin.saveSettings();
+            new Notice(
+              "録音後の自動文字起こしをオフにしました（録音は今までどおり動きます）。設定画面で戻せます。"
+            );
+          });
+        }
+      }),
+      0 // 自動で消さない（対処が必要なので読み切れるまで残す）
+    );
+    return;
+  }
+
+  if (e instanceof MissingDllError) {
+    new Notice(
+      "文字起こしに失敗: whisper の実行に必要な DLL が見つかりません。" +
+        "診断（doctor）の「Windows 版 whisper を取得」で取り直してください。",
+      15000
+    );
+    return;
+  }
+
+  new Notice(`文字起こしに失敗: ${(e as Error).message}`, 10000);
 }
 
 export interface TranscribeCoreOptions {

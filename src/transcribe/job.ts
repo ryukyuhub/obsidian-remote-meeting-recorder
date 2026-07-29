@@ -1,7 +1,12 @@
 import { Notice, TFile } from "obsidian";
 import * as path from "path";
 import type RemoteMeetingRecorderPlugin from "../main";
-import { transcribeAudioToText, buildMarkdown, recordingTimeRange } from "./runTranscription";
+import {
+  transcribeAudioToText,
+  buildMarkdown,
+  recordingTimeRange,
+  notifyTranscribeFailure,
+} from "./runTranscription";
 import { TranscribeCancelled } from "./whisperCppClient";
 import { upsertTranscript, resolveInsertTarget, type DupMode } from "./insertTranscript";
 
@@ -112,9 +117,7 @@ export async function runTranscribeJob(
       new Notice("文字起こしをキャンセルしました。");
       return;
     }
-    // Notice は表示が切れるため、原因追跡用にフルのエラー（whisper の stderr 含む）を console にも出す。
-    console.error("[remote-meeting-recorder] 文字起こしに失敗", e);
-    new Notice(`文字起こしに失敗: ${(e as Error).message}`, 10000);
+    notifyTranscribeFailure(plugin, e);
   } finally {
     window.clearInterval(ticker);
     notice.hide();

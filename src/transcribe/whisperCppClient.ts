@@ -3,6 +3,14 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import { safeUnlink } from "../util/fsx";
+import {
+  LaunchBlockedError,
+  MissingDllError,
+  describeExitCode,
+  isBlockedExit,
+  isBlockedSpawnError,
+  isMissingDllExit,
+} from "../util/winBlock";
 
 export interface TranscribeOptions {
   /** 進捗（0..100）。whisper の -pp 出力を解析して呼ぶ。 */
@@ -70,7 +78,13 @@ export async function transcribeWav(
   return text.trim();
 }
 
-/** whisper-cli を spawn し、stderr から進捗を拾いつつ完了を待つ。失敗時は末尾ログ付きで reject。 */
+/**
+ * whisper-cli を spawn し、stderr から進捗を拾いつつ完了を待つ。失敗時は末尾ログ付きで reject。
+ *
+ * Windows ではファイルがあっても起動を拒まれることがある（Issue #8・スマート アプリ
+ * コントロール）。原因が分かる形で投げ分けないと「whisper-cli が失敗しました (exit 3221226024)」
+ * という追跡不能なメッセージだけがユーザーに残るため、`../util/winBlock` で判定する。
+ */
 function runWhisper(
   bin: string,
   args: string[],
@@ -135,13 +149,33 @@ function runWhisper(
       finish(() => reject(new Error("文字起こしがタイムアウトしました（1時間）。")));
     }, TRANSCRIBE_TIMEOUT_MS);
 
-    child.on("error", (e) => finish(() => reject(e)));
+    child.on("error", (e) =>
+      finish(() => {
+        const code = (e as NodeJS.ErrnoException).code;
+        reject(isBlockedSpawnError(e) ? new LaunchBlockedError(bin, code ?? e.message) : e);
+      })
+    );
     child.on("close", (code) => {
-      finish(() =>
-        code === 0
-          ? resolve()
-          : reject(new Error(`whisper-cli が失敗しました (exit ${code})\n${log.slice(-2000)}`))
-      );
+      finish(() => {
+        if (code === 0) {
+          resolve();
+          return;
+        }
+        // 出力ゼロのまま既知のブロック用コードで落ちた＝実行される前に止められている。
+        if (isBlockedExit(code, log.length > 0)) {
+          reject(new LaunchBlockedError(bin, describeExitCode(code)));
+          return;
+        }
+        if (isMissingDllExit(code)) {
+          reject(new MissingDllError(bin));
+          return;
+        }
+        reject(
+          new Error(
+            `whisper-cli が失敗しました (${describeExitCode(code)})\n${log.slice(-2000)}`
+          )
+        );
+      });
     });
   });
 }
