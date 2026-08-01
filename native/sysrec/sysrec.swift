@@ -879,6 +879,10 @@ struct LaneStats {
     var elapsed: Double = 0
     /// 録音中に取り込みフォーマットが変わった回数（デバイス切替への追従）。
     var formatChanges: Int = 0
+    /// 実測した入力レート（届いたフレーム数 ÷ 実時刻）。
+    var inputRate: Double = 0
+    /// 最終的に入力へ付いていたラベルのレート（実測補正後はその値）。
+    var labeledRate: Double = 0
 }
 
 /// 1 ソース分の取り込み経路（system / mic それぞれ 1 本）。
@@ -913,6 +917,20 @@ final class CaptureLane {
     private var paddedFrames: Int64 = 0
     private var formatChanges = 0
 
+    // 実測レートによるラベル補正（trackInputRate / relabeled）。
+    /// 取り込み側が名乗っているフォーマット（補正前）。
+    private var rawFormat: AVAudioFormat?
+    /// 実測で差し替えたレート（0 なら補正なし）と、そのラベルを持つフォーマット。
+    private var srcRateOverride: Double = 0
+    private var relabelFormat: AVAudioFormat?
+    /// 直前の差し替えが自己補正由来か（デバイス切替と区別して数えるため）。
+    private var selfRelabel = false
+    private var rateWinStart: UInt64 = 0
+    private var rateWinFrames: Int64 = 0
+    private var rateWinDropped: Int64 = 0
+    private var rateCandidate: Double = 0
+    private var totalInputFrames: Int64 = 0
+
     // submit（リアルタイムスレッド）と queue の間で共有
     private let pendingLock = NSLock()
     private var pending = 0
@@ -922,6 +940,15 @@ final class CaptureLane {
     private static let maxPending = 64
     /// 実時刻とのズレをこの長さ以上検出したら無音で埋める（通常のジッタでは埋めない）。
     private static let padThresholdSec = 0.02
+    /// 入力レートを実測する窓の長さ。短くても判別は付く（44100 と 48000 で 8% 違う）が、
+    /// 2 窓連続で同じ結論が出たときだけ採用するので、補正が効くまで約 3 秒。
+    private static let rateWindowSec = 1.5
+    /// ラベルと実測がこの割合以上ずれていたら「ラベルが違う」と見なす。
+    private static let rateTolerance = 0.02
+    /// 実測値を丸める先の候補（ここから 1% 以内で一致したものだけ採用する）。
+    private static let standardRates: [Double] = [
+        8000, 11025, 16000, 22050, 24000, 32000, 44100, 48000, 88200, 96000, 176400, 192000,
+    ]
 
     init(box: WriterBox?, gainDb: Double, sampleRate: Int, channels: Int, label: String,
          onLevel: @escaping (Float) -> Void) {
@@ -953,12 +980,19 @@ final class CaptureLane {
         }
     }
 
-    private func process(_ pcm: AVAudioPCMBuffer, _ hostTime: UInt64) {
+    private func process(_ input: AVAudioPCMBuffer, _ hostTime: UInt64) {
+        trackInputRate(input, hostTime)
+        let pcm = relabeled(input) ?? input
         if norm == nil || normSrc != pcm.format {
             if normSrc != nil && normSrc != pcm.format {
-                formatChanges += 1
-                logErr("\(label): 取り込みフォーマット変化（\(Int(normSrc?.sampleRate ?? 0))Hz → \(Int(pcm.format.sampleRate))Hz）に追従")
+                // 自己補正でラベルを差し替えたぶんはデバイス切替ではないので数えない
+                // （数えると停止時の診断が「切替に追従したぶん」と誤って説明してしまう）。
+                if !selfRelabel {
+                    formatChanges += 1
+                    logErr("\(label): 取り込みフォーマット変化（\(Int(normSrc?.sampleRate ?? 0))Hz → \(Int(pcm.format.sampleRate))Hz）に追従")
+                }
             }
+            selfRelabel = false
             norm = FormatNormalizer(from: pcm.format, sampleRate: Double(sampleRate),
                                     channels: AVAudioChannelCount(max(1, channels)))
             normSrc = pcm.format
@@ -975,6 +1009,101 @@ final class CaptureLane {
 
         onLevel(applyGainAndLevel(out, gain))
         appendBuffer(out)
+    }
+
+    /// **届いたデータから入力レートを実測し、ラベルが違っていたら直す。**
+    ///
+    /// 取り込み側が名乗るサンプルレートは実際に届くデータと食い違うことがある。実例は
+    /// BT 出力（A2DP 44100Hz）で、タップは 48000Hz と報告する。buildAggregate では集約
+    /// デバイスの公称レートを見て貼り替えているが、その公称レートがまだ実レートを反映して
+    /// いない瞬間があり、そのときは 48000Hz のラベルのまま 44100Hz のデータが流れ続ける。
+    /// こうなると下流は 1 − 44100/48000 = 8.1% ぶん実時刻に追いつけず、0.25 秒ごとに無音が
+    /// 挟まる＝「1 秒に 4 回プツプツ切れる」録音になる（実測・0.11.3 / 65 分録音で 8.1%）。
+    ///
+    /// プロパティを信じ足す方向では取り切れないので、**届いたフレーム数 ÷ 実時刻**で
+    /// 実レートを測り、ラベルと 2% 以上ずれた結論が 2 窓続いたらラベルを実測値へ差し替える。
+    /// 散発的な取りこぼしも「レートが低い」ように見えるため、
+    ///   - 取りこぼしのあった窓は判定に使わない
+    ///   - 実測値が標準レートの 1% 以内に乗ったときだけ採用する
+    ///   - 2 窓連続で同じ結論のときだけ採用する
+    /// の 3 つで誤判定を防ぐ。
+    private func trackInputRate(_ pcm: AVAudioPCMBuffer, _ hostTime: UInt64) {
+        totalInputFrames += Int64(pcm.frameLength)
+        // 届くラベル自体が変わったら（デバイス切替）補正を捨てて測り直す。
+        if rawFormat != pcm.format {
+            rawFormat = pcm.format
+            srcRateOverride = 0
+            relabelFormat = nil
+            rateCandidate = 0
+            startRateWindow(hostTime)
+            return
+        }
+        if rateWinStart == 0 { startRateWindow(hostTime); return }
+        rateWinFrames += Int64(pcm.frameLength)
+        let span = AVAudioTime.seconds(forHostTime: hostTime &- rateWinStart)
+        guard span >= Self.rateWindowSec else { return }
+        pendingLock.lock(); let dropped = droppedBuffers; pendingLock.unlock()
+        let clean = dropped == rateWinDropped
+        let measured = Double(rateWinFrames) / span
+        startRateWindow(hostTime)
+
+        guard clean, measured > 0 else { rateCandidate = 0; return }
+        let labeled = srcRateOverride > 0 ? srcRateOverride : pcm.format.sampleRate
+        guard labeled > 0, abs(measured - labeled) / labeled > Self.rateTolerance,
+              let snapped = Self.snapToStandardRate(measured), snapped != labeled else {
+            rateCandidate = 0
+            return
+        }
+        guard rateCandidate == snapped else { rateCandidate = snapped; return }
+        rateCandidate = 0
+        applyRateOverride(snapped, labeled: labeled, measured: measured)
+    }
+
+    private func startRateWindow(_ hostTime: UInt64) {
+        rateWinStart = hostTime
+        rateWinFrames = 0
+        pendingLock.lock(); rateWinDropped = droppedBuffers; pendingLock.unlock()
+    }
+
+    /// 実測値を標準レートへ丸める（1% 以内で一致するものが無ければ採用しない）。
+    private static func snapToStandardRate(_ measured: Double) -> Double? {
+        var best: Double?
+        var bestDiff = Double.infinity
+        for r in standardRates where abs(measured - r) / r < bestDiff {
+            bestDiff = abs(measured - r) / r
+            best = r
+        }
+        return bestDiff <= 0.01 ? best : nil
+    }
+
+    /// 以降のバッファに貼り直すラベルを用意する（チャンネル数・サンプル形式はそのまま）。
+    private func applyRateOverride(_ rate: Double, labeled: Double, measured: Double) {
+        guard let base = rawFormat else { return }
+        var asbd = base.streamDescription.pointee
+        asbd.mSampleRate = rate
+        guard let fmt = AVAudioFormat(streamDescription: &asbd) else { return }
+        srcRateOverride = rate
+        relabelFormat = fmt
+        selfRelabel = true
+        logErr("\(label): 取り込みレートのラベル誤りを実測で補正"
+            + "（ラベル \(Int(labeled))Hz・実測 \(Int(measured.rounded()))Hz → \(Int(rate))Hz として変換）")
+    }
+
+    /// 中身は同じまま、実測で決めたレートのラベルを付け直したバッファを返す（補正なしなら nil）。
+    private func relabeled(_ pcm: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
+        guard let fmt = relabelFormat, fmt != pcm.format,
+              let out = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: pcm.frameLength) else { return nil }
+        out.frameLength = pcm.frameLength
+        let src = UnsafeMutableAudioBufferListPointer(pcm.mutableAudioBufferList)
+        let dst = UnsafeMutableAudioBufferListPointer(out.mutableAudioBufferList)
+        guard src.count == dst.count else { return nil }
+        for i in 0..<src.count {
+            guard let s = src[i].mData, let d = dst[i].mData else { return nil }
+            let bytes = min(Int(src[i].mDataByteSize), Int(dst[i].mDataByteSize))
+            memcpy(d, s, bytes)
+            dst[i].mDataByteSize = UInt32(bytes)
+        }
+        return out
     }
 
     /// 取りこぼした区間を無音で埋める（1 秒ずつ）。
@@ -1006,7 +1135,9 @@ final class CaptureLane {
         pendingLock.lock(); let dropped = droppedBuffers; pendingLock.unlock()
         let elapsed = lastHost > baseHost ? AVAudioTime.seconds(forHostTime: lastHost &- baseHost) : 0
         return LaneStats(frames: frames, padded: paddedFrames, dropped: dropped,
-                         elapsed: elapsed, formatChanges: formatChanges)
+                         elapsed: elapsed, formatChanges: formatChanges,
+                         inputRate: elapsed > 0 ? Double(totalInputFrames) / elapsed : 0,
+                         labeledRate: srcRateOverride > 0 ? srcRateOverride : (rawFormat?.sampleRate ?? 0))
     }
 }
 
@@ -1178,12 +1309,16 @@ final class Capture {
         let msg = "\(name): 取りこぼし \(String(format: "%.1f", secs))秒（\(String(format: "%.1f", ratio * 100))%）を無音で補完"
             + (s.dropped > 0 ? "・処理落ちで破棄 \(s.dropped) バッファ" : "")
         guard ratio > 0.01 else { logErr(msg); return }
-        let measured = s.elapsed > 0 ? Double(s.frames - s.padded) / s.elapsed : 0
+        // レート違いの判定は**入力側どうし**（実測レート vs ラベル）で比べる。出力の
+        // opt.sampleRate と比べると、入力ラベルが正しくてもレート変換の比率ぶんズレて見え、
+        // レート違いを「CPU 負荷」と誤診する（0.11.3 までの実害）。
+        let rateGap = s.labeledRate > 0 && s.inputRate > 0
+            ? abs(s.inputRate - s.labeledRate) / s.labeledRate : 0
         if s.formatChanges > 0 {
             logErr("⚠ \(msg)。録音中に入力レートが変わりました（デバイス切替への追従ぶん）。")
-        } else if measured > 0 && measured < Double(opt.sampleRate) * 0.98 {
-            logErr("⚠ \(msg)。実測入力 \(Int(measured.rounded()))Hz / 想定 \(opt.sampleRate)Hz"
-                + " — デバイスのサンプルレート不一致の可能性があります。")
+        } else if rateGap > 0.02 {
+            logErr("⚠ \(msg)。実測入力 \(Int(s.inputRate.rounded()))Hz / ラベル \(Int(s.labeledRate))Hz"
+                + " — デバイスのサンプルレート不一致です。")
         } else {
             logErr("⚠ \(msg)。CPU 負荷が高い可能性があります。")
         }
