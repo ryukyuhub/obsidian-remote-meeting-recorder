@@ -282,7 +282,7 @@ export default class RemoteMeetingRecorderPlugin extends Plugin {
   }
 
   buildContext(): RecorderContext {
-    return createContext(this.app, this.settings, this.getPluginDir());
+    return createContext(this.app, this.settings, this.getPluginDir(), this.manifest.version);
   }
 
   // ================================================================

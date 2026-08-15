@@ -14,6 +14,8 @@ export interface RecorderContext {
   paths: StatePaths;
   /** プラグインディレクトリの絶対パス */
   pluginDir: string;
+  /** プラグイン本体（manifest.json）の版数。sysrec の版ズレ検出に使う */
+  pluginVersion: string;
   /** sysrec バイナリの絶対パス（未検出なら ""） */
   resolveBinPath(): string;
   /** Vault ルートの絶対パス（デスクトップは常に取れる） */
@@ -29,13 +31,15 @@ export function getVaultBasePath(app: App): string | null {
 export function createContext(
   app: App,
   settings: RMRSettings,
-  pluginDir: string
+  pluginDir: string,
+  pluginVersion: string
 ): RecorderContext {
   return {
     app,
     settings,
     paths: makePaths(settings),
     pluginDir,
+    pluginVersion,
     resolveBinPath: () => resolveBin({ binPath: settings.binPath, pluginDir }),
     getVaultBasePath: () => getVaultBasePath(app),
   };

@@ -6,8 +6,10 @@ import type { RecorderContext } from "../context";
 import { binCandidates } from "../util/resolveBin";
 import {
   isSysrecCompatible,
+  isSysrecOutdated,
   probeSysrecVersion,
   sysrecIncompatibleMessage,
+  sysrecOutdatedMessage,
   REQUIRED_SYSREC_ABI,
 } from "../util/sysrecVersion";
 import { getElectronRemote } from "../platform/electron";
@@ -250,9 +252,12 @@ export function runDoctor(ctx: RecorderContext): DoctorCheck[] {
     detail: `検出: ${binPath}（${found.origin}）`,
   });
 
-  // 2.5 版数照合。バイナリは main.js と別配布なので「本体だけ更新」が起き得る。
-  // 古いバイナリは新しい引数を黙って無視して 0 バイトの録音を作るため、存在だけ見て
-  // ok にしていると原因不明の録音失敗になる。ここで NG にして取得ボタンを出す。
+  // 2.5 版数照合。バイナリは main.js と別配布（BRAT が運ぶのは main.js / manifest.json /
+  // styles.css の 3 点だけ）なので「本体だけ更新」が起き得る。二段構えで見る:
+  //   - abi 不一致 … 古いバイナリは新しい引数を黙って無視して 0 バイトの録音を作るので NG。
+  //   - abi は同じだが版数が古い … 録音はできるが、sysrec 側だけに入った修正が効かない。
+  //     実害あり（0.11.6 の BT 44.1kHz プツプツ修正が届かず 73 分の録音が 8.1% 無音に）。
+  //     abi だけ見ていた頃はこれを ok と表示して 3 週間気付けなかったので warn で出す。
   const sysrecVer = probeSysrecVersion(binPath);
   if (!isSysrecCompatible(sysrecVer)) {
     checks.push({
@@ -262,12 +267,22 @@ export function runDoctor(ctx: RecorderContext): DoctorCheck[] {
       detail: sysrecIncompatibleMessage(sysrecVer, binPath),
       fix: downloadFix,
     });
+  } else if (isSysrecOutdated(sysrecVer.version, ctx.pluginVersion)) {
+    checks.push({
+      id: "binary-version",
+      label: "sysrec バージョン",
+      status: "warn",
+      detail: sysrecOutdatedMessage(sysrecVer.version, ctx.pluginVersion, binPath),
+      fix: downloadFix,
+    });
   } else {
     checks.push({
       id: "binary-version",
       label: "sysrec バージョン",
       status: "ok",
-      detail: `v${sysrecVer.version}（abi ${sysrecVer.abi} / 要求 ${REQUIRED_SYSREC_ABI} 以上）`,
+      detail:
+        `v${sysrecVer.version}（abi ${sysrecVer.abi} / 要求 ${REQUIRED_SYSREC_ABI} 以上）` +
+        `・プラグイン本体 v${ctx.pluginVersion}`,
     });
   }
 
