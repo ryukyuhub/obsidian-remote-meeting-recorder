@@ -14,6 +14,12 @@ import {
 } from "../util/sysrecVersion";
 import { getElectronRemote } from "../platform/electron";
 import { pickAudioFormat } from "../recorder/webCapture";
+import {
+  defaultOutputPhrase,
+  getOutputRouting,
+  loopbackSourceHint,
+  type OutputRouting,
+} from "../audio/webDevices";
 import { execFileAsync } from "../util/exec";
 import {
   resolveWhisperBin,
@@ -166,8 +172,9 @@ function curlDownload(url: string, dest: string, timeoutMs: number): Promise<unk
 /**
  * セットアップ診断を実行（設計書 §9.4）。
  * バイナリ有無 / 実行可否 / 署名 / arch / quarantine / 状態ディレクトリ / macOS / TCC 案内。
+ * Windows の再生デバイス確認（enumerateDevices）が非同期なので、全体を Promise で返す。
  */
-export function runDoctor(ctx: RecorderContext): DoctorCheck[] {
+export async function runDoctor(ctx: RecorderContext): Promise<DoctorCheck[]> {
   // Windows は録音経路（Web Audio / ループバック）が macOS と別なので専用の診断に分岐する。
   if (process.platform === "win32") return windowsDoctor(ctx);
 
@@ -381,10 +388,10 @@ function binaryProbeChecks(binPath: string, executable: boolean): DoctorCheck[] 
 /**
  * Windows 用の診断（Windows対応 実装計画 §Phase W3）。
  * macOS 固有（sysrec/codesign/lipo/xattr/TCC）は該当しないため、ループバック可否・
- * 録音フォーマット・マイク許可案内・状態ディレクトリ・文字起こし・
+ * 再生デバイスの既定／通信のずれ・録音フォーマット・マイク許可案内・状態ディレクトリ・文字起こし・
  * Smart App Control（未署名バイナリのブロック）を見る。
  */
-function windowsDoctor(ctx: RecorderContext): DoctorCheck[] {
+async function windowsDoctor(ctx: RecorderContext): Promise<DoctorCheck[]> {
   const checks: DoctorCheck[] = [];
 
   // 1. 対応 OS
@@ -410,6 +417,9 @@ function windowsDoctor(ctx: RecorderContext): DoctorCheck[] {
       ? "メインプロセスの session にアクセスできます（会議相手の声を録音できます）。"
       : "Electron のメイン session にアクセスできませんでした。システム音声を録音できない可能性があります。",
   });
+
+  // 2.5 システム音声の録音元（既定の再生デバイス）と既定の通信デバイスのずれ
+  checks.push(outputRoutingCheck(await getOutputRouting({ unlockLabels: true })));
 
   // 3. 録音フォーマット（mp4/AAC 優先 → webm）
   const fmt = pickAudioFormat();
@@ -442,6 +452,44 @@ function windowsDoctor(ctx: RecorderContext): DoctorCheck[] {
   checks.push(smartAppControlCheck());
 
   return checks;
+}
+
+/**
+ * システム音声の録音元（Windows のみ）。ループバックは既定の再生デバイスだけを録るので、
+ * 会議アプリの音が「既定の通信デバイス」へ出ていると取りこぼす（Google Meet でシステム音声だけ
+ * 無音になった実害）。既定と通信が別の機器なら warn、同じなら ok、判定不能なら info。
+ */
+function outputRoutingCheck(r: OutputRouting): DoctorCheck {
+  const id = "output-routing";
+  const label = "システム音声の録音元（再生デバイス）";
+  if (r.mismatch === true) {
+    return {
+      id,
+      label,
+      status: "warn",
+      detail:
+        `${loopbackSourceHint(r)}\n` +
+        "（Windows の「サウンド」設定で、既定の通信デバイスを既定の再生デバイスと同じ機器にする方法もあります）",
+    };
+  }
+  if (r.mismatch === false) {
+    return {
+      id,
+      label,
+      status: "ok",
+      // groupId で一致と判定できた場合はラベルが空でも来うるので、名前は取れたときだけ出す。
+      detail: `${defaultOutputPhrase(r)}の音を録音します（既定の通信デバイスも同じ機器です）。`,
+    };
+  }
+  return {
+    id,
+    label,
+    status: "info",
+    detail:
+      `${loopbackSourceHint(r)}\n` +
+      `（${r.defaultName ? "既定の通信デバイスを取得できなかった" : "再生デバイスの名前を取得できなかった"}` +
+      "ため、既定の通信デバイスとのずれは判定できませんでした）",
+  };
 }
 
 /**

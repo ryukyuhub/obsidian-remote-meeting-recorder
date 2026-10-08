@@ -26,6 +26,7 @@ import {
   type NormalizerState,
 } from "./agc";
 import type { RecorderSource } from "../types";
+import { getOutputRouting, type OutputRouting } from "../audio/webDevices";
 
 // --- Electron remote の最小型（platform/electron.ts 経由で取得） -----------------
 interface DesktopCapturerSourceLike {
@@ -45,6 +46,9 @@ interface ElectronRemoteLike {
   session?: { defaultSession?: ElectronSessionLike };
   desktopCapturer: { getSources(opts: { types: string[] }): Promise<DesktopCapturerSourceLike[]> };
 }
+
+/** 無音ウォッチの対象ソース（system=システム音声 / mic=マイク）。 */
+export type SilentSource = "system" | "mic";
 
 /** MediaRecorder で使える最良の音声フォーマットを選ぶ（mp4/AAC 優先 → webm/opus）。 */
 export function pickAudioFormat(): { mimeType: string; ext: string } {
@@ -114,8 +118,13 @@ export interface WebRecorderOptions {
   sysGate?: string;
   /** 予期しない終了（トラック切断・録音エラー・onunload 以外の停止）で呼ばれる。 */
   onTerminated?: () => void;
-  /** 開始直後にレベルが 0 のままだった（＝音が入っていない）ときに 1 度だけ呼ばれる。 */
-  onSilence?: () => void;
+  /**
+   * 開始直後にレベルが 0 のままだった（＝音が入っていない）ソースがあるときに呼ばれる
+   * （ソースごとに最大 1 回）。`sources` は今回無音と判定したソースで、両方 0 のときは 2 つ同時に
+   * 1 回だけ届く。`outputRouting` は開始時に調べた再生デバイスの既定／通信の対応
+   * （システム音声を録らない・未判明なら null）。
+   */
+  onSilence?: (sources: SilentSource[], outputRouting: OutputRouting | null) => void;
 }
 
 /** dB → 線形ゲイン。 */
@@ -123,8 +132,17 @@ function dbToLinear(db: number): number {
   return Math.pow(10, db / 20);
 }
 
-/** 開始後この時間ずっとレベルが 0 なら「音が入っていない」と判断して警告する。 */
+/**
+ * 開始後この時間ずっとレベルが 0 なら「音が入っていない」と判断して警告する（マイク・両方 0）。
+ * 録音対象が全部 0 なのはグラフ自体が死んでいる疑いが強いので、早めに知らせる。
+ */
 const SILENCE_WATCH_MS = 5000;
+/**
+ * システム音声だけが 0 のときの猶予。会議前に録音を始めた・開始直後に誰も話さない、といった
+ * 正常な状況でもループバックは厳密に 0 になる（マイクと違い環境ノイズが乗らない）ため、
+ * 5 秒では誤警告が多い。マイクに音が入っていればグラフは生きているので、長めに待ってよい。
+ */
+const SYSTEM_SILENCE_WATCH_MS = 20000;
 const SILENCE_WATCH_INTERVAL_MS = 500;
 /** AGC の更新周期（ms）。macOS はキャプチャチャンク単位なので、それに近い粒度にする。 */
 const AGC_TICK_MS = 100;
@@ -175,9 +193,10 @@ export class WebRecorder {
   private readonly manualMix: boolean;
   private readonly agc: boolean;
   private readonly onTerminated?: () => void;
-  private readonly onSilence?: () => void;
+  private readonly onSilence?: WebRecorderOptions["onSilence"];
   private silenceTimer: number | null = null;
-  private silenceWarned = false;
+  /** 開始時に調べた再生デバイスの既定／通信の対応（システム音声を録らない・未判明なら null）。 */
+  private outputRouting: OutputRouting | null = null;
 
   private systemStream: MediaStream | null = null;
   private micStream: MediaStream | null = null;
@@ -389,6 +408,11 @@ export class WebRecorder {
 
     this.startSilenceWatch();
     this.startAgc();
+    // 再生デバイスの既定／通信のずれ確認。マイク取得後のほうがデバイスのラベルが埋まりやすいので
+    // この位置で行う。録音の成否には関わらないので待たない（失敗しても判定不能になるだけ）。
+    void this.inspectOutputRouting().catch((e) =>
+      console.debug("[remote-meeting-recorder] 再生デバイスの確認に失敗しました", e)
+    );
 
     // デバイス切断・共有停止などでトラックが切れたら予期しない終了として扱う。
     const onEnded = () => this.handleUnexpectedEnd();
@@ -453,21 +477,68 @@ export class WebRecorder {
    * ループバックが音を出していない）と、経過時間だけ進んで**中身が完全な無音のファイル**が
    * 出来上がる。1 時間録ってから気づくのが最悪なので、開始から数秒レベルが厳密に 0 のままなら
    * その場で警告する（録音は止めない。会議開始前で本当に無音なだけ、という場合もあるため）。
+   *
+   * 判定はソース別（macOS の無音ウォッチと同じ規則）。以前は片方に音があれば監視を終えていたため、
+   * 「マイクは録れているがシステム音声だけ無音」（会議の音が既定以外の再生デバイスへ出ている等）を
+   * 見逃した。録音対象のソースごとに一度でも音が入ったかを追い、警告はソースごとに最大 1 回:
+   *   - 両方 0（グラフ自体が死んでいる疑い）・マイク 0 … SILENCE_WATCH_MS で判定。両方 0 なら
+   *     「両方」として 1 回だけ知らせ、システム音声を後から重ねて知らせない。
+   *   - システム音声だけ 0 … 会議前の正常な無音と区別しにくいので SYSTEM_SILENCE_WATCH_MS まで待つ。
    */
   private startSilenceWatch(): void {
-    const deadline = Date.now() + SILENCE_WATCH_MS;
+    const pending = new Set<SilentSource>();
+    if (this.source !== "mic") pending.add("system");
+    if (this.source !== "system") pending.add("mic");
+    const startedAt = Date.now();
+    const warn = (sources: SilentSource[]) => {
+      sources.forEach((s) => pending.delete(s)); // 知らせたソースは監視対象から外す（重ねて知らせない）
+      this.onSilence?.(sources, this.outputRouting);
+    };
     const tick = () => {
-      if (this.stopped || this.silenceWarned) return;
+      if (this.stopped) return;
       const { system, mic } = this.getSourceLevels();
-      if (system > 0 || mic > 0) return; // 音が入った＝グラフは生きている。監視終了。
-      if (Date.now() < deadline) {
-        this.silenceTimer = window.setTimeout(tick, SILENCE_WATCH_INTERVAL_MS);
-        return;
+      if (system > 0) pending.delete("system");
+      if (mic > 0) pending.delete("mic");
+      const elapsed = Date.now() - startedAt;
+      if (elapsed >= SILENCE_WATCH_MS) {
+        if (pending.has("system") && pending.has("mic")) warn(["system", "mic"]);
+        else if (pending.has("mic")) warn(["mic"]);
       }
-      this.silenceWarned = true;
-      this.onSilence?.();
+      if (elapsed >= SYSTEM_SILENCE_WATCH_MS && pending.has("system")) warn(["system"]);
+      if (pending.size === 0) return; // 全対象ソースに音が入った（または警告済み）。監視終了。
+      this.silenceTimer = window.setTimeout(tick, SILENCE_WATCH_INTERVAL_MS);
     };
     this.silenceTimer = window.setTimeout(tick, SILENCE_WATCH_INTERVAL_MS);
+  }
+
+  /**
+   * 再生デバイスの既定／通信のずれを調べ、診断ログを出す（システム音声を録るときだけ）。
+   * ループバックは Windows の既定の再生デバイスしか録らない。結果は保持して無音ウォッチの
+   * 警告文に使う（ずれ単独では通知しない。会議前など正常な状況での誤警告を避けるため）。
+   */
+  private async inspectOutputRouting(): Promise<void> {
+    const track = this.systemStream?.getAudioTracks()[0];
+    if (!track) return;
+    const label = track.label;
+    const settings = track.getSettings();
+    const routing = await getOutputRouting();
+    if (this.stopped) return;
+    this.outputRouting = routing;
+    const info = {
+      trackLabel: label,
+      trackSettings: settings,
+      defaultOutput: routing.defaultName,
+      communicationsOutput: routing.communicationsName,
+      mismatch: routing.mismatch,
+    };
+    if (routing.mismatch) {
+      console.warn(
+        "[remote-meeting-recorder] 既定の再生デバイスと既定の通信デバイスが異なります（システム音声は既定の再生デバイスのみ録音）",
+        info
+      );
+    } else {
+      console.debug("[remote-meeting-recorder] システム音声の取得元", info);
+    }
   }
 
   /**

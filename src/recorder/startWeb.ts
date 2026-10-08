@@ -7,7 +7,7 @@ import type { SessionMeta, StartOptions } from "../types";
 import { newSessionId, writeSessionMeta } from "../state/sessionStore";
 import { resolveOutPath, StartError, type StartResult } from "./start";
 import { ensureDir } from "../util/fsx";
-import { WebRecorder, pickAudioFormat } from "./webCapture";
+import { WebRecorder, pickAudioFormat, type WebRecorderOptions } from "./webCapture";
 
 export interface WebStartResult extends StartResult {
   recorder: WebRecorder;
@@ -16,12 +16,13 @@ export interface WebStartResult extends StartResult {
 /**
  * Windows 録音を開始する。onTerminated は「予期しない終了」（トラック切断・録音エラー）で
  * 生成した sessionId 付きで呼ばれる。呼び出し側（main.ts）は WebRecorder を保持すること。
+ * onSilence（開始直後に無音のソースがあった）は警告用で、録音は止めない。
  */
 export async function startWebRecording(
   ctx: RecorderContext,
   o: StartOptions,
   onTerminated: (sessionId: string) => void,
-  onSilence?: () => void
+  onSilence?: WebRecorderOptions["onSilence"]
 ): Promise<WebStartResult> {
   ensureDir(o.saveDir);
 

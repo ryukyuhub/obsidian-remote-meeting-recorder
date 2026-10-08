@@ -15,9 +15,14 @@ import { startRecording, type StartResult } from "./start";
 import { stopRecording } from "./stop";
 import { startWebRecording } from "./startWeb";
 import { stopWebRecording } from "./stopWeb";
-import type { WebRecorder } from "./webCapture";
+import type { SilentSource, WebRecorder } from "./webCapture";
 import { listMicDevices, type MicDevice } from "./devices";
-import { listWebMicDevices } from "../audio/webDevices";
+import {
+  defaultOutputPhrase,
+  listWebMicDevices,
+  loopbackSourceHint,
+  type OutputRouting,
+} from "../audio/webDevices";
 import { WebAudioTap } from "../audio/webAudioTap";
 import { LevelPoller } from "./levelPoller";
 import { sessionPaths } from "../state/paths";
@@ -185,6 +190,40 @@ class DarwinBackend implements RecorderBackend {
   }
 }
 
+/**
+ * Windows 無音ウォッチの警告文（macOS の文言と揃える）。状況で強さを分ける:
+ *   - 両方 0 … グラフ自体が死んでいる疑い。再生デバイスへの誘導は付けず、取り込み全般を確認させる。
+ *   - マイクのみ 0 … マイク権限・入力デバイス。
+ *   - システム音声のみ 0 ＋ 既定/通信のずれ … 取りこぼしの可能性が高いので強めに、両デバイス名と直し方。
+ *   - システム音声のみ 0 ＋ 一致/判定不能 … 会議前の正常な無音もありうるので短く。
+ */
+function webSilenceMessage(sources: SilentSource[], routing: OutputRouting | null): string {
+  const system = sources.includes("system");
+  const mic = sources.includes("mic");
+  if (system && mic) {
+    return (
+      "⚠ システム音声とマイクのレベルが 0 のままです。音声が取り込めていない可能性があります" +
+      "（マイク権限・入力デバイス・再生デバイスの接続状態を確認してください）。録音自体は継続しています。"
+    );
+  }
+  if (mic) {
+    return (
+      "⚠ マイクのレベルが 0 のままです。音声が取り込めていない可能性があります" +
+      "（マイク権限・入力デバイスを確認してください）。録音自体は継続しています。"
+    );
+  }
+  if (routing?.mismatch === true) {
+    return (
+      "⚠ システム音声のレベルが 0 のままです。会議の音声が録音されていない可能性があります" +
+      `（録音自体は継続しています）。\n${loopbackSourceHint(routing)}`
+    );
+  }
+  return (
+    "システム音声のレベルが 0 のままです。会議の音声がまだ流れていなければ問題ありません" +
+    `（システム音声は Windows の${defaultOutputPhrase(routing)}だけを録音します）。`
+  );
+}
+
 // ====================================================================
 // Windows: レンダラ内 Web Audio 録音（WebRecorder）。
 // 真実の源はメモリ側（webRecorders Map）。予期しない終了（トラック切断）は
@@ -200,11 +239,7 @@ class Win32Backend implements RecorderBackend {
       this.deps.getCtx(),
       opts,
       (id) => this.onUnexpectedEnd(id),
-      () =>
-        this.deps.notify(
-          "録音レベルが 0 のままです。音声が取り込めていない可能性があります" +
-            "（システム音声の共有・マイクの許可・入力デバイスを確認してください）。"
-        )
+      (sources, routing) => this.deps.notify(webSilenceMessage(sources, routing))
     );
     this.webRecorders.set(r.sessionId, r.recorder);
     return r;
