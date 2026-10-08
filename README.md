@@ -1,6 +1,6 @@
 # Remote Meeting Recorder
 
-Record your online meetings inside Obsidian. This desktop-only, macOS plugin
+Record your online meetings inside Obsidian. This desktop-only plugin (macOS and Windows)
 captures **system audio (what the other participants say)** and **your
 microphone** at the same time, keeps every recording safe across crashes and
 reloads, and links the audio — and an optional local transcript — straight into
@@ -44,6 +44,12 @@ repository (see [Installation](#installation)).
   the doctor panel).
 - **Microphone permission** for Obsidian (macOS asks on first recording). Screen
   recording is not required — system audio is captured via Core Audio taps.
+- **Windows** needs no `sysrec`: system audio is recorded in-app via loopback
+  (recording stops when Obsidian closes; crash recovery is macOS-only). Only the
+  **Windows default playback device** is captured. If the other participants are
+  missing from the recording, set your meeting app's speaker to "Default", or make
+  the default communication device the same as the default playback device in
+  Windows Sound settings (the doctor item "システム音声の録音元" shows any mismatch).
 
 ## Installation
 
