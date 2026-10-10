@@ -1,33 +1,3 @@
-# CLAUDE.md
-
-このファイルは Claude Code がこのリポジトリで作業する際のガイドです。**作業前に必ず設計書を参照**してください。
-
-## プロジェクト概要
-
-Obsidian デスクトップ向け**リモート会議録音プラグイン**（plugin id: `remote-meeting-recorder`）。
-macOS のシステム音声（＝会議相手の声）とマイクを同時録音し、**録音データを絶対に失わない**堅牢さで、Obsidian ノート／文字起こしに直結させる。
-
-- 対象環境: macOS 15+（開発機 macOS 26.5 arm64）/ Node v24 / esbuild / TypeScript、録音バイナリは swiftc。
-- 現状: **greenfield（コード未生成）**。設計フェーズ完了、実装は Phase 0 から着手待ち。
-
-## 必読ドキュメント（単一の真実の源）
-
-| ドキュメント | 役割 |
-|---|---|
-| `リモート会議録音プラグイン 設計書.md` | **最重要**。アーキテクチャ・モジュール・UI・堅牢性・文字起こし・Phase の全定義 |
-| `Obsidian録音プラグイン向け 録音ノウハウレポート.md` | candypi 会議録音MCP の運用実績（実装知見の出典） |
-| `~/.claude/plans/obsidian-steady-hinton.md` | 承認済み実装計画（Phase 0–3） |
-| `/Users/candy/www/candypi/native/sysrec/` | 流用元の録音バイナリ `sysrec.swift` / `build.sh` / `sysrec.entitlements` |
-| `/Users/candy/www/candypi/src/connectors/meeting-recorder/` | セッション状態機械の出典（recipes.ts / tools.ts） |
-
-## アーキテクチャ要点（詳細は設計書）
-
-- **録音エンジンは外部ヘルパー `sysrec`**（Swift / ScreenCaptureKit）。Electron/Chromium だけでは macOS のシステム音声を確実に録れないため（設計書 §2・独立した参考プラグイン 2 本でも実証済み §14/§16）。
-- **状態機械（start/stop/sweep/remix）は TypeScript + `child_process`/`fs`** で再実装。**真実の源はファイルシステム**（`~/.meeting-recorder/`）——sysrec はレンダラより長生きするため状態はメモリに置かない。`onunload` で録音を殺さない。
-- **堅牢性が最優先**: 起動検証してから JSON を書く／孤児 sweep で中間ファイルを温存／mix 失敗は `stop-warning`→remix 復旧／片系だけなら rename で救う（設計書 §5/§6）。
-- **文字起こしはローカル Whisper サーバ（MLX）**。アーカイブ m4a（高品質）と 16kHz mono PCM（文字起こし用）を分離（設計書 §15）。
-- **Phase 0–3 = 録音堅牢性（v1）**、Phase 4 = 録音ビュー拡充／ホットキー／ミニ制御ウィンドウ、Phase 6–7 = 文字起こし（一括→リアルタイム）。
-
 ## ビルド・コマンド（scaffold 後に有効）
 
 | コマンド | 用途 |
@@ -39,25 +9,51 @@ macOS のシステム音声（＝会議相手の声）とマイクを同時録�
 
 テスト vault へは `ln -s <repo> <vault>/.obsidian/plugins/remote-meeting-recorder` でシンボリックリンク。
 
-## 規約
-
-### 日本語対応
+## 日本語対応
 
 - **ドキュメント・コード内コメント・コミットメッセージ・UI 文言・Notice・ログは日本語**で書く。
 - ただし**識別子（変数 / 関数 / 型 / ファイル名）は英語**（可読性・慣習優先）。
 - 設計書・README も日本語で維持する。
 
-### サブエージェント運用（トークン節約）
+## カスタムエージェント
 
-- **E2E 系の作業**（実機 E2E、fake-binary E2E、Obsidian 起動確認、録音の駆動・検証、`verify` 相当）と、**Web 検索・外部調査系の作業**（WebSearch、参考プラグイン調査、外部ドキュメント収集、GitHub リポジトリ調査）は、**Sonnet のサブエージェントに委譲**してメインのトークンを節約する。
-  - 例: `Agent(subagent_type: "general-purpose", model: "sonnet", …)`、探索は `Agent(subagent_type: "Explore", model: "sonnet", …)`。
-  - サブエージェントには**結論（要点・差分・可否）だけを返させ**、生ログやファイル全文をメインに持ち込まない。
-- 逆に、**設計判断・アーキテクチャの決定・状態機械やコアロジックの実装**はメイン（Opus）で行う。
+`.claude/agents/` に役割別の定義がある。**メインは指揮に徹し、実作業は委譲する**。出力が長い / 手順が決まっている / 並列にできる、のどれかに当てはまれば委譲する。迷ったら委譲側に倒す。
 
-## 作業の進め方
+会話では `displayName`で指名されることもあるが、**呼び出しには下表の `name`（＝定義ファイル名）を使う**。
 
-- 大きな変更の前に設計書の該当 Phase / セクションを確認し、逸脱する場合はユーザーに相談する。
-- **リリース（version bump）前に手動 E2E を促す**: `test/manual-e2e/README.md` の実施タイミング表に従い、最低でも `01-smoke.md` の実施をユーザーに提案する。結果は `test/manual-e2e/results/` に記録。録音エンジン・文字起こし・UI を変更したときは該当チェックリストも対象。
-- **E2E は自動駆動を積極活用する（ユーザー方針・2026-07-25）**: 実機 E2E は Obsidian を `--remote-debugging-port=9222` で起動し、`dev/cdp-eval.mjs`（CDP・JS評価）で録音の開始〜停止〜検証まで人手ゼロで回せる（実証済み・手順は `test/manual-e2e/README.md`）。公式 Obsidian CLI（`obsidian command --id=<id>`・要セットアップ）も併用可。**耳での確認が必要な項目だけ**ユーザーに依頼し、それ以外は自走する。テスト後はデバッグポート無しで Obsidian を再起動して戻す。
-- 実装は Phase 単位で進め、各 Phase 末に設計書の「到達点」で検証する（設計書 §12）。
-- ユーザーが「実装開始」と言うまでコード生成しない方針で進めてきた経緯がある——スコープはユーザー確認を優先。
+
+| 作業の種類                                            | 担当（`name`）       |
+| ------------------------------------------------ | ---------------- |
+| 機能追加・リファクタリングの実装計画（着手前の影響範囲調査・設計検討）              | `planner`        |
+| コードの修正・実装（方針が決まっている実作業。バグ修正・リファクタリング適用・テスト追加）    | `implementer`    |
+| コード変更のレビュー（差分・PR・特定ファイルの品質確認）                    | `code-reviewer`  |
+| テストの実行・ビルド確認・動作検証（CI 失敗の再現調査を含む）                 | `test-runner`    |
+| 実ブラウザでの動作確認・E2E・画面の目視確認（chrome-devtools は全てここ）   | `e2e-tester`     |
+| ドキュメントの作成・更新（README / API 仕様 / コメント、コード変更への追従）   | `doc-writer`     |
+| リモートサーバー（本番）の調査・運用（SSH でのログ確認・障害調査・設定適用） | `remote-ops`     |
+| Web 検索・URL 取得・最新情報の調査（ライブラリ最新版・エラー調査・技術選定）       | `web-researcher` |
+
+
+### モデルの指定
+
+既定は各定義の frontmatter。作業の難易度に応じて呼び出し時の `model` で上書きする。
+
+
+| 作業の性格                   | モデル      |
+| ----------------------- | -------- |
+| 設計判断・原因調査・レビュー・非自明なバグ修正 | `opus`   |
+| 手順が決まっている実行・検証・情報収集     | `sonnet` |
+| 定型で機械的な作業（一括置換・件数集計）    | `haiku`  |
+
+
+### 同時実行数
+
+同時に動かすサブエージェントは、`.env` の `MAX_PARALLEL_SUBAGENTS` の値までとするが、その定数が無い場合は3とする。  
+
+
+### Claude Virtual Agents
+
+```cva
+color: #380818ff
+name: ObMeetRec
+```
